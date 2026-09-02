@@ -85,7 +85,7 @@ Pushing a tag beginning with `v` triggers the GitHub Actions release workflow. I
 
 MemRead is distributed outside the Mac App Store and therefore needs a Developer ID Application certificate and Apple notarization.
 
-1. Join or confirm the [Apple Developer Program](https://developer.apple.com/programs/) for team `YKY7LZN774`.
+1. Join or confirm the [Apple Developer Program](https://developer.apple.com/programs/) for team `H5VCJSQZFX`.
 2. In [Certificates, Identifiers & Profiles](https://developer.apple.com/account/resources/certificates/list), create a **Developer ID Application** certificate, export it from Keychain Access as a password-protected `.p12`, and Base64-encode it with `base64 -i certificate.p12 | tr -d '\n'`.
 3. In [App Store Connect Users and Access](https://appstoreconnect.apple.com/access/users), create an API key with Developer access and download its `.p8` file. Apple only permits that download once. Base64-encode it with `base64 -i AuthKey_KEYID.p8 | tr -d '\n'`.
 4. Add these GitHub Actions repository secrets. Never commit a certificate, password, or `.p8` key:
@@ -95,7 +95,7 @@ MemRead is distributed outside the Mac App Store and therefore needs a Developer
 | `APPLE_CERTIFICATE` | Base64-encoded Developer ID Application `.p12` |
 | `APPLE_CERTIFICATE_PASSWORD` | Password used when exporting the `.p12` |
 | `KEYCHAIN_PASSWORD` | A new, random password used only by the temporary CI keychain |
-| `APPLE_TEAM_ID` | `YKY7LZN774` |
+| `APPLE_TEAM_ID` | `H5VCJSQZFX` |
 | `APPLE_API_KEY_ID` | App Store Connect API key ID |
 | `APPLE_API_ISSUER` | App Store Connect API issuer ID |
 | `APPLE_API_KEY_BASE64` | Base64-encoded downloaded `.p8` API key |
