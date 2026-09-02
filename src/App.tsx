@@ -467,6 +467,31 @@ function useStorageExplorer(autoScan: boolean): StorageExplorer {
   }, []);
 
   useEffect(() => {
+    if (!isReady) {
+      return;
+    }
+
+    let disposed = false;
+    async function refreshCapacity(): Promise<void> {
+      try {
+        const nextSummary = await invoke<DiskSummary>("disk_summary");
+        if (!disposed) {
+          setSummary(nextSummary);
+        }
+      } catch {
+        // A failed capacity refresh should never interrupt the storage explorer.
+      }
+    }
+
+    void refreshCapacity();
+    const interval = window.setInterval(() => void refreshCapacity(), 5_000);
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+    };
+  }, [isReady]);
+
+  useEffect(() => {
     if (!isReady || restoredCache.current) {
       return;
     }
