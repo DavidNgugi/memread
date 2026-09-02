@@ -18,7 +18,7 @@ use tauri::{
     Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct StorageEntry {
     name: String,
@@ -32,7 +32,7 @@ struct StorageEntry {
     protection_reason: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct DiskSummary {
     total: u64,
@@ -71,6 +71,57 @@ struct ActiveScan {
 #[derive(Default)]
 struct ScanManager {
     active: Mutex<Option<ActiveScan>>,
+}
+
+#[derive(Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct QuickGlanceSnapshot {
+    entries: Vec<StorageEntry>,
+    summary: Option<DiskSummary>,
+}
+
+#[derive(Default)]
+struct QuickGlanceStore {
+    snapshot: Mutex<QuickGlanceSnapshot>,
+}
+
+impl QuickGlanceStore {
+    fn snapshot(&self) -> Result<QuickGlanceSnapshot, String> {
+        self.snapshot
+            .lock()
+            .map(|snapshot| snapshot.clone())
+            .map_err(|_| "The quick glance data became unavailable.".to_string())
+    }
+
+    fn replace_entries(&self, entries: Vec<StorageEntry>) -> Result<(), String> {
+        let mut snapshot = self
+            .snapshot
+            .lock()
+            .map_err(|_| "The quick glance data became unavailable.".to_string())?;
+        snapshot.entries = entries;
+        Ok(())
+    }
+
+    fn set_summary(&self, summary: DiskSummary) -> Result<(), String> {
+        let mut snapshot = self
+            .snapshot
+            .lock()
+            .map_err(|_| "The quick glance data became unavailable.".to_string())?;
+        snapshot.summary = Some(summary);
+        Ok(())
+    }
+
+    fn update_size(&self, path: &str, size: u64, partial: bool) -> Result<(), String> {
+        let mut snapshot = self
+            .snapshot
+            .lock()
+            .map_err(|_| "The quick glance data became unavailable.".to_string())?;
+        if let Some(entry) = snapshot.entries.iter_mut().find(|entry| entry.path == path) {
+            entry.size = Some(size);
+            entry.partial = partial;
+        }
+        Ok(())
+    }
 }
 
 impl ScanManager {
@@ -224,6 +275,17 @@ fn emit_sized_entry(app: &tauri::AppHandle, entry: SizedEntry) {
     }
 }
 
+fn emit_quick_glance(app: &tauri::AppHandle, store: &QuickGlanceStore) {
+    match store.snapshot() {
+        Ok(snapshot) => {
+            if let Err(error) = app.emit("quick-glance-updated", snapshot) {
+                eprintln!("MemRead could not update quick glance: {error}");
+            }
+        }
+        Err(error) => eprintln!("MemRead could not read quick glance data: {error}"),
+    }
+}
+
 fn category_for(path: &Path) -> String {
     match path
         .file_name()
@@ -281,10 +343,22 @@ fn scan_root(path: Option<String>) -> Result<(PathBuf, PathBuf), String> {
 }
 
 #[tauri::command]
-async fn scan_storage(path: Option<String>) -> Result<Vec<StorageEntry>, String> {
-    tauri::async_runtime::spawn_blocking(move || scan_storage_sync(path))
+async fn scan_storage(
+    app: tauri::AppHandle,
+    quick_glance: tauri::State<'_, Arc<QuickGlanceStore>>,
+    path: Option<String>,
+) -> Result<Vec<StorageEntry>, String> {
+    let is_home_scan = path.is_none();
+    let entries = tauri::async_runtime::spawn_blocking(move || scan_storage_sync(path))
         .await
-        .map_err(|error| format!("The folder listing worker stopped unexpectedly: {error}"))?
+        .map_err(|error| format!("The folder listing worker stopped unexpectedly: {error}"))??;
+
+    if is_home_scan {
+        quick_glance.replace_entries(entries.clone())?;
+        emit_quick_glance(&app, &quick_glance);
+    }
+
+    Ok(entries)
 }
 
 fn scan_storage_sync(path: Option<String>) -> Result<Vec<StorageEntry>, String> {
@@ -343,12 +417,15 @@ fn scan_storage_sync(path: Option<String>) -> Result<Vec<StorageEntry>, String> 
 async fn measure_storage(
     app: tauri::AppHandle,
     scan_manager: tauri::State<'_, ScanManager>,
+    quick_glance: tauri::State<'_, Arc<QuickGlanceStore>>,
     path: Option<String>,
     scan_id: u64,
 ) -> Result<(), String> {
     let cancelled = scan_manager.begin(scan_id)?;
+    let is_home_scan = path.is_none();
+    let quick_glance = quick_glance.inner().clone();
     let worker_result = tauri::async_runtime::spawn_blocking(move || {
-        measure_storage_sync(app, path, scan_id, cancelled)
+        measure_storage_sync(app, path, scan_id, cancelled, quick_glance, is_home_scan)
     })
     .await
     .map_err(|error| format!("The size worker stopped unexpectedly: {error}"));
@@ -361,6 +438,8 @@ fn measure_storage_sync(
     path: Option<String>,
     scan_id: u64,
     cancelled: Arc<AtomicBool>,
+    quick_glance: Arc<QuickGlanceStore>,
+    is_home_scan: bool,
 ) -> Result<(), String> {
     let (home, root) = scan_root(path)?;
     let mut entries = Vec::new();
@@ -411,15 +490,17 @@ fn measure_storage_sync(
         let Some(measurement) = measurement else {
             return Ok(());
         };
-        emit_sized_entry(
-            &app,
-            SizedEntry {
-                scan_id,
-                path: path.to_string_lossy().into_owned(),
-                size: measurement.size,
-                partial: measurement.partial,
-            },
-        );
+        let sized_entry = SizedEntry {
+            scan_id,
+            path: path.to_string_lossy().into_owned(),
+            size: measurement.size,
+            partial: measurement.partial,
+        };
+        if is_home_scan {
+            quick_glance.update_size(&sized_entry.path, sized_entry.size, sized_entry.partial)?;
+            emit_quick_glance(&app, &quick_glance);
+        }
+        emit_sized_entry(&app, sized_entry);
         emit_progress(
             &app,
             ScanProgress {
@@ -445,7 +526,10 @@ fn measure_storage_sync(
 }
 
 #[tauri::command]
-fn disk_summary() -> Result<DiskSummary, String> {
+fn disk_summary(
+    app: tauri::AppHandle,
+    quick_glance: tauri::State<'_, Arc<QuickGlanceStore>>,
+) -> Result<DiskSummary, String> {
     let home = home_dir()?;
     let path = std::ffi::CString::new(home.as_os_str().as_encoded_bytes())
         .map_err(|_| "Invalid home directory.".to_string())?;
@@ -454,10 +538,20 @@ fn disk_summary() -> Result<DiskSummary, String> {
         return Err(io::Error::last_os_error().to_string());
     }
     let block_size = stats.f_frsize as u64;
-    Ok(DiskSummary {
+    let summary = DiskSummary {
         total: stats.f_blocks as u64 * block_size,
         available: stats.f_bavail as u64 * block_size,
-    })
+    };
+    quick_glance.set_summary(summary.clone())?;
+    emit_quick_glance(&app, &quick_glance);
+    Ok(summary)
+}
+
+#[tauri::command]
+fn quick_glance_snapshot(
+    quick_glance: tauri::State<'_, Arc<QuickGlanceStore>>,
+) -> Result<QuickGlanceSnapshot, String> {
+    quick_glance.snapshot()
 }
 
 #[tauri::command]
@@ -478,7 +572,7 @@ fn move_to_trash_sync(path: String) -> Result<(), String> {
     if let Some(reason) = protection_for(&canonical, &home) {
         return Err(reason);
     }
-    let trash = home.join(".Trash").join("MemRead");
+    let trash = home.join(".Trash");
     fs::create_dir_all(&trash).map_err(|error| error.to_string())?;
     let name = canonical
         .file_name()
@@ -491,6 +585,39 @@ fn move_to_trash_sync(path: String) -> Result<(), String> {
     }
     fs::rename(&canonical, destination)
         .map_err(|error| format!("Could not move this item to Trash: {error}"))
+}
+
+fn migrate_legacy_trash_items() {
+    let Ok(home) = home_dir() else {
+        return;
+    };
+    let trash = home.join(".Trash");
+    let legacy_trash = trash.join("MemRead");
+    let Ok(items) = fs::read_dir(&legacy_trash) else {
+        return;
+    };
+
+    for item in items.flatten() {
+        let source = item.path();
+        let Some(name) = source.file_name() else {
+            continue;
+        };
+        let mut destination = trash.join(name);
+        let mut suffix = 1;
+        while destination.exists() {
+            destination = trash.join(format!("{}-{suffix}", name.to_string_lossy()));
+            suffix += 1;
+        }
+        if let Err(error) = fs::rename(&source, destination) {
+            eprintln!("MemRead could not expose a legacy Trash item: {error}");
+        }
+    }
+
+    if let Err(error) = fs::remove_dir(&legacy_trash) {
+        if error.kind() != io::ErrorKind::NotFound {
+            eprintln!("MemRead could not remove its empty legacy Trash folder: {error}");
+        }
+    }
 }
 
 #[tauri::command]
@@ -544,11 +671,13 @@ fn verify_storage_access() -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .manage(ScanManager::default())
+        .manage(Arc::new(QuickGlanceStore::default()))
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             scan_storage,
             measure_storage,
             disk_summary,
+            quick_glance_snapshot,
             move_to_trash,
             open_full_disk_access,
             open_main_window,
@@ -557,6 +686,7 @@ pub fn run() {
             verify_storage_access
         ])
         .setup(|app| {
+            migrate_legacy_trash_items();
             let about = MenuItemBuilder::with_id("about", "About MemRead").build(app)?;
             let open = MenuItemBuilder::with_id("open", "Open MemRead").build(app)?;
             let quit = MenuItemBuilder::with_id("quit", "Quit MemRead").build(app)?;

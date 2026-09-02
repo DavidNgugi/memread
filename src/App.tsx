@@ -441,17 +441,52 @@ function AboutView() {
   );
 }
 
-interface QuickGlanceProps {
+interface QuickGlanceSnapshot {
   entries: StorageEntry[];
-  isReady: boolean;
   summary: DiskSummary | null;
 }
 
-function QuickGlance({ entries, isReady, summary }: QuickGlanceProps) {
+interface QuickGlanceProps {
+  isReady: boolean;
+}
+
+function QuickGlance({ isReady }: QuickGlanceProps) {
+  const [snapshot, setSnapshot] = useState<QuickGlanceSnapshot>({ entries: [], summary: null });
+
+  useEffect(() => {
+    let disposed = false;
+    let stopListening: (() => void) | undefined;
+
+    void invoke<QuickGlanceSnapshot>("quick_glance_snapshot")
+      .then((nextSnapshot) => {
+        if (!disposed) {
+          setSnapshot(nextSnapshot);
+        }
+      })
+      .catch(() => undefined);
+
+    void listen<QuickGlanceSnapshot>("quick-glance-updated", ({ payload }) => {
+      setSnapshot(payload);
+    }).then((unlisten) => {
+      if (disposed) {
+        unlisten();
+      } else {
+        stopListening = unlisten;
+      }
+    });
+
+    return () => {
+      disposed = true;
+      stopListening?.();
+    };
+  }, []);
+
   if (!isReady) {
     return <QuickSetup />;
   }
 
+  const { entries, summary } = snapshot;
+  const topEntries = [...entries].sort((left, right) => compareEntries(left, right, DEFAULT_SORT)).slice(0, 5);
   const used = summary ? summary.total - summary.available : 0;
   const usedPercent = summary ? (used / summary.total) * 100 : 0;
 
@@ -476,7 +511,7 @@ function QuickGlance({ entries, isReady, summary }: QuickGlanceProps) {
           <span>USED</span>
           <span>%</span>
         </div>
-        {entries.slice(0, 5).map((entry, index) => (
+        {topEntries.map((entry, index) => (
           <div className="quick-row" key={entry.path}>
             <span className={"swatch s" + index} />
             <b>{entry.name}</b>
@@ -488,6 +523,7 @@ function QuickGlance({ entries, isReady, summary }: QuickGlanceProps) {
             </span>
           </div>
         ))}
+        {!topEntries.length && <p className="quick-empty">Run a scan to see your largest folders.</p>}
       </div>
       <div className="quick-actions">
         <button className="quick-open" onClick={() => void invoke<void>("open_main_window")}>
@@ -946,7 +982,7 @@ export default function App() {
   }
 
   if (route === "#quick-glance") {
-    return <QuickGlance entries={explorer.entries} isReady={explorer.isReady} summary={explorer.summary} />;
+    return <QuickGlance isReady={explorer.isReady} />;
   }
 
   if (!explorer.isReady) {
