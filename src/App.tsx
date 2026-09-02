@@ -8,6 +8,11 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
 import "./App.css";
 
 interface StorageEntry {
@@ -115,6 +120,7 @@ interface IconProps extends SVGProps<SVGSVGElement> {
     | "folder"
     | "menu"
     | "overview"
+    | "refresh"
     | "search"
     | "shield"
     | "sortAsc"
@@ -124,6 +130,8 @@ interface IconProps extends SVGProps<SVGSVGElement> {
 
 const BYTE_UNITS = ["B", "KB", "MB", "GB", "TB"] as const;
 const DEFAULT_SORT: SortState = { key: "size", direction: "descending" };
+const CURRENT_VERSION = "0.1.1";
+const LATEST_RELEASE_ENDPOINT = "https://api.github.com/repos/DavidNgugi/memread/releases/latest";
 
 function defaultSortDirection(key: SortKey): SortDirection {
   return key === "modified" || key === "size" ? "descending" : "ascending";
@@ -179,6 +187,30 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+async function notifyIfAllowed(title: string, body: string): Promise<void> {
+  if (await isPermissionGranted()) {
+    sendNotification({ title, body });
+  }
+}
+
+function versionParts(version: string): number[] {
+  return version.replace(/^v/, "").split(".").map((part) => Number.parseInt(part, 10) || 0);
+}
+
+function isNewerVersion(candidate: string, current: string): boolean {
+  const candidateParts = versionParts(candidate);
+  const currentParts = versionParts(current);
+  const longestVersion = Math.max(candidateParts.length, currentParts.length);
+  for (let index = 0; index < longestVersion; index += 1) {
+    const candidatePart = candidateParts[index] ?? 0;
+    const currentPart = currentParts[index] ?? 0;
+    if (candidatePart !== currentPart) {
+      return candidatePart > currentPart;
+    }
+  }
+  return false;
+}
+
 function nextFrame(): Promise<void> {
   return new Promise((resolve) => requestAnimationFrame(() => resolve()));
 }
@@ -210,6 +242,9 @@ function Icon({ name, ...props }: IconProps) {
           <circle cx="12" cy="12" r="8.5" />
           <path d="M12 3.5V12h8.5" />
         </>
+      )}
+      {name === "refresh" && (
+        <path d="M19 8V4m0 0h-4m4 0-3 3a7 7 0 1 0 2.1 5M5 16v4m0 0h4m-4 0 3-3a7 7 0 0 0-2.1-5" />
       )}
       {name === "chevron" && <path d="m9 18 6-6-6-6" />}
       {name === "back" && <path d="m15 18-6-6 6-6" />}
@@ -278,6 +313,10 @@ function useStorageExplorer(autoScan: boolean): StorageExplorer {
 
       if (payload.total > 0 && payload.completed === payload.total) {
         setCalculating(false);
+        void notifyIfAllowed(
+          "MemRead scan complete",
+          "Measured " + payload.total + " items. Your storage map is ready.",
+        );
       }
     }).then((unlisten) => {
       stopProgress = unlisten;
@@ -608,6 +647,71 @@ function useCleanupShortcuts() {
   }
 
   return { addShortcut, checkSpace, checkingId, isLoading, removeShortcut, shortcuts };
+}
+
+interface AvailableUpdate {
+  version: string;
+}
+
+function useUpdateCheck() {
+  const [availableUpdate, setAvailableUpdate] = useState<AvailableUpdate | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [status, setStatus] = useState("");
+
+  async function check(): Promise<void> {
+    setChecking(true);
+    setStatus("");
+    try {
+      const response = await fetch(LATEST_RELEASE_ENDPOINT, {
+        headers: { Accept: "application/vnd.github+json" },
+      });
+      if (!response.ok) {
+        throw new Error("Update check is unavailable.");
+      }
+      const release = (await response.json()) as { tag_name?: string };
+      if (release.tag_name && isNewerVersion(release.tag_name, CURRENT_VERSION)) {
+        const update = { version: release.tag_name.replace(/^v/, "") };
+        setAvailableUpdate(update);
+        setStatus("v" + update.version + " available");
+        void notifyIfAllowed("MemRead update available", "Version " + update.version + " is ready to download.");
+      } else {
+        setAvailableUpdate(null);
+        setStatus("Up to date");
+      }
+    } catch {
+      setStatus("Unavailable");
+    } finally {
+      setChecking(false);
+    }
+  }
+
+  useEffect(() => {
+    void check();
+  }, []);
+
+  return { availableUpdate, check, checking, status };
+}
+
+function useNotificationPermission() {
+  const [enabled, setEnabled] = useState(false);
+
+  useEffect(() => {
+    void isPermissionGranted().then(setEnabled).catch(() => setEnabled(false));
+  }, []);
+
+  async function enable(): Promise<void> {
+    const permission = await requestPermission();
+    const granted = permission === "granted";
+    setEnabled(granted);
+    if (granted) {
+      await sendNotification({
+        title: "MemRead notifications enabled",
+        body: "You will be notified when scans finish and updates are available.",
+      });
+    }
+  }
+
+  return { enable, enabled };
 }
 
 function AboutView() {
@@ -1346,13 +1450,26 @@ function CleanupShortcuts({ onSelectForTrash }: CleanupShortcutsProps) {
 type DashboardView = "cleanups" | "explorer" | "overview";
 
 interface SidebarProps {
+  availableUpdate: AvailableUpdate | null;
+  checkingForUpdate: boolean;
   collapsed: boolean;
   currentView: DashboardView;
+  onCheckForUpdate: () => Promise<void>;
   onCollapse: () => void;
   onNavigate: (view: DashboardView) => void;
+  updateStatus: string;
 }
 
-function Sidebar({ collapsed, currentView, onCollapse, onNavigate }: SidebarProps) {
+function Sidebar({
+  availableUpdate,
+  checkingForUpdate,
+  collapsed,
+  currentView,
+  onCheckForUpdate,
+  onCollapse,
+  onNavigate,
+  updateStatus,
+}: SidebarProps) {
   const navigation: { icon: IconProps["name"]; label: string; view: DashboardView }[] = [
     { icon: "overview", label: "Overview", view: "overview" },
     { icon: "folder", label: "Explorer", view: "explorer" },
@@ -1381,14 +1498,50 @@ function Sidebar({ collapsed, currentView, onCollapse, onNavigate }: SidebarProp
           </button>
         ))}
       </nav>
-      {!collapsed && <p className="sidebar-note">LOCAL-ONLY STORAGE MAP</p>}
+      <div className="sidebar-update">
+        <button
+          aria-label={availableUpdate ? "Open version " + availableUpdate.version : "Check for updates"}
+          disabled={checkingForUpdate}
+          onClick={() => {
+            if (availableUpdate) {
+              void invoke<void>("open_latest_release");
+            } else {
+              void onCheckForUpdate();
+            }
+          }}
+        >
+          <Icon name="refresh" />
+          <span>
+            {checkingForUpdate
+              ? "Checking…"
+              : availableUpdate
+                ? "Update v" + availableUpdate.version
+                : updateStatus === "Up to date"
+                  ? "v" + CURRENT_VERSION
+                  : "Check for updates"}
+          </span>
+        </button>
+        {!collapsed && !availableUpdate && updateStatus && (
+          <span>{updateStatus === "Up to date" ? "You have the latest version" : updateStatus}</span>
+        )}
+      </div>
     </aside>
   );
 }
 
-function Overview({ explorer, onExplore, onCleanups }: {
+function Overview({
+  availableUpdate,
+  explorer,
+  notificationsEnabled,
+  onCleanups,
+  onEnableNotifications,
+  onExplore,
+}: {
+  availableUpdate: AvailableUpdate | null;
   explorer: StorageExplorer;
+  notificationsEnabled: boolean;
   onCleanups: () => void;
+  onEnableNotifications: () => Promise<void>;
   onExplore: () => void;
 }) {
   const measuredEntries = explorer.entries.filter((entry) => entry.size !== null);
@@ -1442,6 +1595,26 @@ function Overview({ explorer, onExplore, onCleanups }: {
         </div>
         <button onClick={onCleanups}>View cleanups <Icon name="arrow" /></button>
       </section>
+      <section className="overview-status">
+        <div>
+          <p className="kicker">NOTIFICATIONS</p>
+          <h2>{notificationsEnabled ? "Scan alerts are on." : "Know when the scan is ready."}</h2>
+          <p>
+            {notificationsEnabled
+              ? "MemRead will notify you when a background scan completes."
+              : "Enable native notifications for completed scans and available updates."}
+          </p>
+        </div>
+        {!notificationsEnabled && (
+          <button onClick={() => void onEnableNotifications()}>Enable notifications</button>
+        )}
+        {availableUpdate && (
+          <div className="update-available">
+            <span>v{availableUpdate.version} is available</span>
+            <button onClick={() => void invoke<void>("open_latest_release")}>View update</button>
+          </div>
+        )}
+      </section>
     </section>
   );
 }
@@ -1449,6 +1622,8 @@ function Overview({ explorer, onExplore, onCleanups }: {
 function Dashboard({ explorer }: { explorer: StorageExplorer }) {
   const [view, setView] = useState<DashboardView>("overview");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const update = useUpdateCheck();
+  const notifications = useNotificationPermission();
 
   function openFolder(entry: StorageEntry): void {
     explorer.openFolder(entry);
@@ -1458,10 +1633,14 @@ function Dashboard({ explorer }: { explorer: StorageExplorer }) {
   return (
     <div className={sidebarCollapsed ? "dashboard-shell sidebar-is-collapsed" : "dashboard-shell"}>
       <Sidebar
+        availableUpdate={update.availableUpdate}
+        checkingForUpdate={update.checking}
         collapsed={sidebarCollapsed}
         currentView={view}
+        onCheckForUpdate={update.check}
         onCollapse={() => setSidebarCollapsed((collapsed) => !collapsed)}
         onNavigate={setView}
+        updateStatus={update.status}
       />
       <main className="app">
         <DashboardHeader
@@ -1475,8 +1654,11 @@ function Dashboard({ explorer }: { explorer: StorageExplorer }) {
         )}
         {view === "overview" && (
           <Overview
+            availableUpdate={update.availableUpdate}
             explorer={{ ...explorer, openFolder }}
+            notificationsEnabled={notifications.enabled}
             onCleanups={() => setView("cleanups")}
+            onEnableNotifications={notifications.enable}
             onExplore={() => setView("explorer")}
           />
         )}

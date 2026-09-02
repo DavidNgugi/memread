@@ -909,6 +909,15 @@ fn open_creator_website() -> Result<(), String> {
 }
 
 #[tauri::command]
+fn open_latest_release() -> Result<(), String> {
+    Command::new("open")
+        .arg("https://github.com/DavidNgugi/memread/releases/latest")
+        .spawn()
+        .map_err(|error| format!("Could not open the latest release: {error}"))?;
+    Ok(())
+}
+
+#[tauri::command]
 fn quit_app(app: tauri::AppHandle) {
     app.exit(0);
 }
@@ -930,6 +939,7 @@ pub fn run() {
         .manage(ScanManager::default())
         .manage(Arc::new(QuickGlanceStore::default()))
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             scan_storage,
             measure_storage,
@@ -943,6 +953,7 @@ pub fn run() {
             open_full_disk_access,
             open_main_window,
             open_creator_website,
+            open_latest_release,
             quit_app,
             verify_storage_access
         ])
