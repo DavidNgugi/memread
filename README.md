@@ -1,6 +1,18 @@
 # MemRead
 
+<p align="center">
+  <a href="https://github.com/DavidNgugi/memread/releases"><img src="https://img.shields.io/github/v/tag/DavidNgugi/memread?label=version&sort=semver" alt="Version" /></a>
+  <a href="https://github.com/DavidNgugi/memread/actions/workflows/release.yml"><img src="https://github.com/DavidNgugi/memread/actions/workflows/release.yml/badge.svg" alt="Release build" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2f6f5f" alt="MIT License" /></a>
+  <img src="https://img.shields.io/badge/platform-macOS%20Apple%20silicon-172d2a" alt="macOS on Apple silicon" />
+</p>
+
 **A fast, local-first macOS storage explorer.**
+
+**Latest version:** [`v0.1.0`](https://github.com/DavidNgugi/memread/releases/tag/v0.1.0)
+
+**Requirements:** macOS on Apple silicon, Full Disk Access
+**License:** [MIT](LICENSE)
 
 MemRead shows where disk space is going without uploading file names, paths, or measurements. Browse your home folder, inspect large items as their sizes are calculated in the background, and move confirmed items to Trash without permanently deleting them.
 
@@ -10,7 +22,7 @@ MemRead shows where disk space is going without uploading file names, paths, or 
 - See live scan progress, recently measured items, and a Calculating state for unresolved sizes.
 - Mark incomplete measurements as Partial when macOS protects or denies access to content.
 - Search the current directory and navigate with breadcrumbs.
-- Move eligible items to the MemRead folder in macOS Trash after confirmation.
+- Move eligible items to macOS Trash after confirmation.
 - Protect app data, credentials, and developer-tool directories from accidental removal.
 - Open a menu-bar quick glance with available storage and the largest scanned items.
 - Cancel stale background scans automatically when you navigate to another folder.
@@ -21,7 +33,7 @@ MemRead is local-first: it does not send storage information, file names, or pat
 
 macOS separately protects some data owned by other apps, including Library Containers and Group Containers. MemRead intentionally excludes those containers from automatic measurement to avoid repeated system privacy prompts. A displayed Partial size means protected or unreadable content was omitted.
 
-MemRead never permanently deletes an item. Eligible removals are moved to the MemRead folder in Trash, where they remain recoverable until you empty Trash yourself.
+MemRead never permanently deletes an item. Eligible removals are moved to macOS Trash, where they remain recoverable until you empty Trash yourself.
 
 ## Requirements
 
@@ -34,7 +46,7 @@ The app guides you through Full Disk Access on first run. Grant it to the instal
 
 ## Install
 
-Download the DMG from a GitHub release, open it, and copy MemRead.app to Applications.
+Download the latest DMG from [GitHub Releases](https://github.com/DavidNgugi/memread/releases), open it, and copy MemRead.app to Applications.
 
 For a local development build:
 
