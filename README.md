@@ -9,7 +9,7 @@
 
 **A fast, local-first macOS storage explorer.**
 
-**Latest version:** [`v0.1.3`](https://github.com/DavidNgugi/memread/releases/tag/v0.1.3)
+**Latest version:** [`v0.1.4`](https://github.com/DavidNgugi/memread/releases/tag/v0.1.4)
 
 **Requirements:** macOS on Apple silicon, Full Disk Access
 **License:** [MIT](LICENSE)

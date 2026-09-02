@@ -138,7 +138,7 @@ interface IconProps extends SVGProps<SVGSVGElement> {
 
 const BYTE_UNITS = ["B", "KB", "MB", "GB", "TB"] as const;
 const DEFAULT_SORT: SortState = { key: "size", direction: "descending" };
-const CURRENT_VERSION = "0.1.3";
+const CURRENT_VERSION = "0.1.4";
 const LATEST_RELEASE_ENDPOINT = "https://api.github.com/repos/DavidNgugi/memread/releases/latest";
 
 function defaultSortDirection(key: SortKey): SortDirection {
@@ -818,7 +818,7 @@ function AboutView() {
           David Ngugi
         </a>
       </p>
-      <p className="about-version">Version 0.1.3</p>
+      <p className="about-version">Version 0.1.4</p>
     </main>
   );
 }
