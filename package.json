@@ -1,7 +1,7 @@
 {
   "name": "memread",
   "private": false,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A local-first macOS storage explorer built with Tauri.",
   "license": "MIT",
   "type": "module",
