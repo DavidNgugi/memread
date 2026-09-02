@@ -631,7 +631,7 @@ function AboutView() {
           David Ngugi
         </a>
       </p>
-      <p className="about-version">Version 0.1.0</p>
+      <p className="about-version">Version 0.1.1</p>
     </main>
   );
 }
