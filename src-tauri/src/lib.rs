@@ -342,18 +342,30 @@ fn scan_root(path: Option<String>) -> Result<(PathBuf, PathBuf), String> {
     Ok((home, root))
 }
 
+fn is_home_scan(path: Option<&String>) -> bool {
+    let Ok(home) = home_dir() else {
+        return false;
+    };
+
+    path.is_none_or(|path| {
+        Path::new(path)
+            .canonicalize()
+            .is_ok_and(|root| root == home)
+    })
+}
+
 #[tauri::command]
 async fn scan_storage(
     app: tauri::AppHandle,
     quick_glance: tauri::State<'_, Arc<QuickGlanceStore>>,
     path: Option<String>,
 ) -> Result<Vec<StorageEntry>, String> {
-    let is_home_scan = path.is_none();
+    let home_scan = is_home_scan(path.as_ref());
     let entries = tauri::async_runtime::spawn_blocking(move || scan_storage_sync(path))
         .await
         .map_err(|error| format!("The folder listing worker stopped unexpectedly: {error}"))??;
 
-    if is_home_scan {
+    if home_scan {
         quick_glance.replace_entries(entries.clone())?;
         emit_quick_glance(&app, &quick_glance);
     }
@@ -422,10 +434,10 @@ async fn measure_storage(
     scan_id: u64,
 ) -> Result<(), String> {
     let cancelled = scan_manager.begin(scan_id)?;
-    let is_home_scan = path.is_none();
+    let home_scan = is_home_scan(path.as_ref());
     let quick_glance = quick_glance.inner().clone();
     let worker_result = tauri::async_runtime::spawn_blocking(move || {
-        measure_storage_sync(app, path, scan_id, cancelled, quick_glance, is_home_scan)
+        measure_storage_sync(app, path, scan_id, cancelled, quick_glance, home_scan)
     })
     .await
     .map_err(|error| format!("The size worker stopped unexpectedly: {error}"));
@@ -773,6 +785,9 @@ pub fn run() {
                                 let _ = window.set_position(position);
                                 let _ = window.show();
                                 let _ = window.set_focus();
+                                let quick_glance =
+                                    tray.app_handle().state::<Arc<QuickGlanceStore>>();
+                                emit_quick_glance(tray.app_handle(), &quick_glance);
 
                                 let blur_state = ignore_opening_blur.clone();
                                 let presentation_id = presentation_id.clone();

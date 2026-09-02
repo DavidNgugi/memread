@@ -195,7 +195,7 @@ function Icon({ name, ...props }: IconProps) {
   );
 }
 
-function useStorageExplorer(): StorageExplorer {
+function useStorageExplorer(autoScan: boolean): StorageExplorer {
   const scanIdRef = useRef(0);
   const [isReady, setIsReady] = useState(
     () => localStorage.getItem("memread-setup-v2") === "yes",
@@ -219,6 +219,7 @@ function useStorageExplorer(): StorageExplorer {
   const [selectedEntry, setSelectedEntry] = useState<StorageEntry | null>(null);
   const [moving, setMoving] = useState(false);
   const [notice, setNotice] = useState("");
+  const hasAutoScanned = useRef(false);
 
   useEffect(() => {
     let stopProgress: (() => void) | undefined;
@@ -268,6 +269,15 @@ function useStorageExplorer(): StorageExplorer {
       stopSizes?.();
     };
   }, []);
+
+  useEffect(() => {
+    if (!autoScan || !isReady || hasAutoScanned.current) {
+      return;
+    }
+
+    hasAutoScanned.current = true;
+    void scan();
+  }, [autoScan, isReady]);
 
   async function scan(path = root): Promise<void> {
     const scanId = ++scanIdRef.current;
@@ -651,13 +661,47 @@ function DashboardHeader({ calculating, isScanning, summary, onScan }: Dashboard
       </div>
       <div className="capacity">
         <span>AVAILABLE</span>
-        <b>{summary ? formatBytes(summary.available) : "Reading"}</b>
+        <b>
+          {summary ? formatBytes(summary.available) + " of " + formatBytes(summary.total) : "Reading"}
+        </b>
         <i style={{ width: usedPercent + "%" }} />
       </div>
       <button className="scan" disabled={isScanning} onClick={() => void onScan()}>
         {buttonLabel}
       </button>
     </header>
+  );
+}
+
+function StorageCapacityBar({ summary }: { summary: DiskSummary | null }) {
+  if (!summary) {
+    return null;
+  }
+
+  const used = summary.total - summary.available;
+  const usedPercent = Math.min(100, (used / summary.total) * 100);
+
+  return (
+    <section className="storage-capacity" aria-label="Overall disk usage">
+      <div className="storage-capacity-title">
+        <span>OVERALL DISK USE</span>
+        <b>{formatBytes(used)} used of {formatBytes(summary.total)}</b>
+      </div>
+      <div
+        aria-label={formatBytes(used) + " used, " + formatBytes(summary.available) + " available"}
+        aria-valuemax={summary.total}
+        aria-valuemin={0}
+        aria-valuenow={used}
+        className="storage-capacity-bar"
+        role="progressbar"
+      >
+        <i style={{ width: usedPercent + "%" }} />
+      </div>
+      <div className="storage-capacity-labels">
+        <span><i className="used-key" /> Used {formatBytes(used)}</span>
+        <span><i className="available-key" /> Available {formatBytes(summary.available)}</span>
+      </div>
+    </section>
   );
 }
 
@@ -927,23 +971,7 @@ function Dashboard({ explorer }: { explorer: StorageExplorer }) {
       {explorer.calculating && (
         <ScanProgressPanel activity={explorer.scanActivity} progress={explorer.scanProgress} />
       )}
-      <section className="hero">
-        <div>
-          <p className="kicker">LOCAL STORAGE AT A GLANCE</p>
-          <h1>
-            Every byte has
-            <br />
-            an address.
-          </h1>
-        </div>
-        <div className="hero-note">
-          <Icon name="shield" />
-          <p>
-            Protected paths are visible but never removable here. Everything else goes to Trash,
-            never straight to deletion.
-          </p>
-        </div>
-      </section>
+      <StorageCapacityBar summary={explorer.summary} />
       {explorer.notice && (
         <button className="toast" onClick={explorer.dismissNotice}>
           {explorer.notice} ×
@@ -974,8 +1002,8 @@ function Dashboard({ explorer }: { explorer: StorageExplorer }) {
 }
 
 export default function App() {
-  const explorer = useStorageExplorer();
   const route = window.location.hash;
+  const explorer = useStorageExplorer(!route);
 
   if (route === "#about") {
     return <AboutView />;
