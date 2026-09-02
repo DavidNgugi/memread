@@ -265,7 +265,12 @@ fn is_other_app_container(path: &Path, home: &Path) -> bool {
         .any(|name| path == library.join(name))
 }
 
-fn bytes_in(path: &Path, home: &Path, cancelled: &AtomicBool) -> Option<SizeMeasurement> {
+fn bytes_in(
+    path: &Path,
+    home: &Path,
+    cancelled: &AtomicBool,
+    include_protected: bool,
+) -> Option<SizeMeasurement> {
     if cancelled.load(Ordering::Relaxed) {
         return None;
     }
@@ -348,7 +353,7 @@ fn bytes_in(path: &Path, home: &Path, cancelled: &AtomicBool) -> Option<SizeMeas
                 continue;
             }
             let child_path = child.path();
-            if protected_containers.contains(&child_path) {
+            if !include_protected && protected_containers.contains(&child_path) {
                 measurement.partial = true;
                 continue;
             }
@@ -517,7 +522,7 @@ fn inspect_cleanup_path_sync(path: PathBuf) -> Result<CleanupShortcut, String> {
     }
 
     let cancelled = AtomicBool::new(false);
-    let measurement = bytes_in(&canonical, &home, &cancelled)
+    let measurement = bytes_in(&canonical, &home, &cancelled, false)
         .ok_or_else(|| "Measuring this folder was cancelled.".to_string())?;
     let name = canonical
         .file_name()
@@ -536,7 +541,7 @@ fn inspect_cleanup_path_sync(path: PathBuf) -> Result<CleanupShortcut, String> {
     })
 }
 
-fn scan_root(path: Option<String>) -> Result<(PathBuf, PathBuf), String> {
+fn scan_root(path: Option<String>, include_protected: bool) -> Result<(PathBuf, PathBuf), String> {
     let home = home_dir()?;
     let root = path
         .map(PathBuf::from)
@@ -547,9 +552,10 @@ fn scan_root(path: Option<String>) -> Result<(PathBuf, PathBuf), String> {
         return Err("MemRead only scans folders inside your home directory.".into());
     }
     let library = home.join("Library");
-    if ["Containers", "Group Containers"]
-        .iter()
-        .any(|name| root.starts_with(library.join(name)))
+    if !include_protected
+        && ["Containers", "Group Containers"]
+            .iter()
+            .any(|name| root.starts_with(library.join(name)))
     {
         return Err("macOS protects data owned by other apps. MemRead leaves these containers out to avoid permission prompts.".into());
     }
@@ -573,11 +579,15 @@ async fn scan_storage(
     app: tauri::AppHandle,
     quick_glance: tauri::State<'_, Arc<QuickGlanceStore>>,
     path: Option<String>,
+    include_protected: bool,
 ) -> Result<Vec<StorageEntry>, String> {
     let home_scan = is_home_scan(path.as_ref());
-    let entries = tauri::async_runtime::spawn_blocking(move || scan_storage_sync(path))
-        .await
-        .map_err(|error| format!("The folder listing worker stopped unexpectedly: {error}"))??;
+    let entries =
+        tauri::async_runtime::spawn_blocking(move || scan_storage_sync(path, include_protected))
+            .await
+            .map_err(|error| {
+                format!("The folder listing worker stopped unexpectedly: {error}")
+            })??;
 
     if home_scan {
         quick_glance.replace_entries(entries.clone())?;
@@ -587,8 +597,11 @@ async fn scan_storage(
     Ok(entries)
 }
 
-fn scan_storage_sync(path: Option<String>) -> Result<Vec<StorageEntry>, String> {
-    let (home, root) = scan_root(path)?;
+fn scan_storage_sync(
+    path: Option<String>,
+    include_protected: bool,
+) -> Result<Vec<StorageEntry>, String> {
+    let (home, root) = scan_root(path, include_protected)?;
     let mut results = Vec::new();
     for entry in fs::read_dir(&root).map_err(|error| error.to_string())? {
         let entry = match entry {
@@ -656,12 +669,21 @@ async fn measure_storage(
     quick_glance: tauri::State<'_, Arc<QuickGlanceStore>>,
     path: Option<String>,
     scan_id: u64,
+    include_protected: bool,
 ) -> Result<(), String> {
     let cancelled = scan_manager.begin(scan_id)?;
     let home_scan = is_home_scan(path.as_ref());
     let quick_glance = quick_glance.inner().clone();
     let worker_result = tauri::async_runtime::spawn_blocking(move || {
-        measure_storage_sync(app, path, scan_id, cancelled, quick_glance, home_scan)
+        measure_storage_sync(
+            app,
+            path,
+            scan_id,
+            cancelled,
+            quick_glance,
+            home_scan,
+            include_protected,
+        )
     })
     .await
     .map_err(|error| format!("The size worker stopped unexpectedly: {error}"));
@@ -676,8 +698,9 @@ fn measure_storage_sync(
     cancelled: Arc<AtomicBool>,
     quick_glance: Arc<QuickGlanceStore>,
     is_home_scan: bool,
+    include_protected: bool,
 ) -> Result<(), String> {
-    let (home, root) = scan_root(path)?;
+    let (home, root) = scan_root(path, include_protected)?;
     let mut entries = Vec::new();
     for entry in fs::read_dir(&root).map_err(|error| error.to_string())? {
         match entry {
@@ -722,7 +745,7 @@ fn measure_storage_sync(
                 partial: false,
             })
         } else {
-            bytes_in(&path, &home, &cancelled)
+            bytes_in(&path, &home, &cancelled, include_protected)
         };
         let Some(measurement) = measurement else {
             return;
@@ -1229,7 +1252,8 @@ mod tests {
         fs::write(home.join("Library/Containers/other.app/data"), b"secret")
             .expect("fixture data should be written");
         let cancelled = AtomicBool::new(false);
-        let measurement = bytes_in(&home, &home, &cancelled).expect("scan should not be cancelled");
+        let measurement =
+            bytes_in(&home, &home, &cancelled, false).expect("scan should not be cancelled");
         assert!(measurement.partial);
         fs::remove_dir_all(home).expect("fixture should be removed");
     }
@@ -1239,7 +1263,7 @@ mod tests {
         let home = unique_test_dir("cancelled");
         fs::create_dir_all(&home).expect("fixture should be created");
         let cancelled = AtomicBool::new(true);
-        assert!(bytes_in(&home, &home, &cancelled).is_none());
+        assert!(bytes_in(&home, &home, &cancelled, false).is_none());
         fs::remove_dir_all(home).expect("fixture should be removed");
     }
 }

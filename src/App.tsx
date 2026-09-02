@@ -111,7 +111,7 @@ interface StorageExplorer {
   goBack: () => void;
   moveSelectedToTrash: () => Promise<void>;
   openFolder: (entry: StorageEntry) => void;
-  scan: (path?: string, force?: boolean) => Promise<void>;
+  scan: (path?: string, force?: boolean, includeProtected?: boolean) => Promise<void>;
   scanBreadcrumb: (index: number) => void;
   scanHome: () => void;
   toggleTiming: () => void;
@@ -363,8 +363,9 @@ function useStorageExplorer(autoScan: boolean): StorageExplorer {
     return path || "__home__";
   }
 
-  function beginMeasurement(path: string, scanId: number): void {
+  function beginMeasurement(path: string, scanId: number, includeProtected = false): void {
     void invoke<void>("measure_storage", {
+      includeProtected,
       path: path || undefined,
       scanId,
     }).catch((error: unknown) => {
@@ -533,7 +534,7 @@ function useStorageExplorer(autoScan: boolean): StorageExplorer {
     void scan();
   }, [autoScan, cacheReady, isReady]);
 
-  async function scan(path = root, force = false): Promise<void> {
+  async function scan(path = root, force = false, includeProtected = false): Promise<void> {
     const scanId = ++scanIdRef.current;
     const key = cacheKey(path);
     const cached = directoryCache.current.get(key);
@@ -548,7 +549,7 @@ function useStorageExplorer(autoScan: boolean): StorageExplorer {
       setIsScanning(false);
       setCalculating(!cached.isComplete);
       if (!cached.isComplete) {
-        beginMeasurement(path, scanId);
+        beginMeasurement(path, scanId, includeProtected);
       }
       return;
     }
@@ -569,7 +570,7 @@ function useStorageExplorer(autoScan: boolean): StorageExplorer {
 
     try {
       const [nextEntries, disk] = await Promise.all([
-        invoke<StorageEntry[]>("scan_storage", { path: path || undefined }),
+        invoke<StorageEntry[]>("scan_storage", { includeProtected, path: path || undefined }),
         invoke<DiskSummary>("disk_summary"),
       ]);
 
@@ -598,7 +599,7 @@ function useStorageExplorer(autoScan: boolean): StorageExplorer {
       setScanProgress(progress);
 
       await nextFrame();
-      beginMeasurement(path, scanId);
+      beginMeasurement(path, scanId, includeProtected);
     } catch (error) {
       if (scanId === scanIdRef.current) {
         stopScanTimer();
@@ -1156,13 +1157,13 @@ interface DashboardHeaderProps {
   scanElapsedMs: number | null;
   summary: DiskSummary | null;
   timingEnabled: boolean;
-  onScan: () => Promise<void>;
+  onFullScan: () => void;
 }
 
 function DashboardHeader({
   calculating,
   isScanning,
-  onScan,
+  onFullScan,
   onToggleTiming,
   scanElapsedMs,
   summary,
@@ -1186,7 +1187,7 @@ function DashboardHeader({
         </b>
         <i style={{ width: usedPercent + "%" }} />
       </div>
-      <button className="scan" disabled={isScanning} onClick={() => void onScan()}>
+      <button className="scan" disabled={isScanning} onClick={onFullScan}>
         {buttonLabel}
       </button>
       <button className={timingEnabled ? "debug-timing enabled" : "debug-timing"} onClick={onToggleTiming}>
@@ -1197,6 +1198,35 @@ function DashboardHeader({
           : "Debug timing: off"}
       </button>
     </header>
+  );
+}
+
+function ProtectedScanDialog({
+  onCancel,
+  onConfirm,
+}: {
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div className="veil">
+      <section aria-modal="true" className="modal protected-scan-modal" role="dialog">
+        <Icon className="modal-icon" name="shield" />
+        <p className="kicker">FULL SCAN</p>
+        <h2>Include protected app data?</h2>
+        <p>
+          MemRead normally skips other apps’ containers to avoid repeated macOS permission requests.
+          Continue only if you want macOS to ask for access while scanning every readable path.
+        </p>
+        <p className="protected-scan-note">
+          macOS can still deny individual folders. Those are shown as partial, never guessed.
+        </p>
+        <div>
+          <button onClick={onCancel}>Cancel</button>
+          <button className="danger" onClick={onConfirm}>Ask anyway &amp; full scan</button>
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -2035,6 +2065,7 @@ function Dashboard({ explorer }: { explorer: StorageExplorer }) {
   const [view, setView] = useState<DashboardView>("overview");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showExplorerMap, setShowExplorerMap] = useState(false);
+  const [showProtectedScanDialog, setShowProtectedScanDialog] = useState(false);
   const update = useUpdateCheck();
   const notifications = useNotificationPermission();
 
@@ -2059,7 +2090,7 @@ function Dashboard({ explorer }: { explorer: StorageExplorer }) {
         <DashboardHeader
           calculating={explorer.calculating}
           isScanning={explorer.isScanning}
-          onScan={() => explorer.scan(undefined, true)}
+          onFullScan={() => setShowProtectedScanDialog(true)}
           onToggleTiming={explorer.toggleTiming}
           scanElapsedMs={explorer.scanElapsedMs}
           summary={explorer.summary}
@@ -2123,6 +2154,15 @@ function Dashboard({ explorer }: { explorer: StorageExplorer }) {
             moving={explorer.moving}
             onCancel={() => explorer.selectEntry(null)}
             onConfirm={explorer.moveSelectedToTrash}
+          />
+        )}
+        {showProtectedScanDialog && (
+          <ProtectedScanDialog
+            onCancel={() => setShowProtectedScanDialog(false)}
+            onConfirm={() => {
+              setShowProtectedScanDialog(false);
+              void explorer.scan(undefined, true, true);
+            }}
           />
         )}
       </main>
