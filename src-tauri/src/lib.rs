@@ -20,7 +20,7 @@ use tauri::{
     Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
 
-#[derive(Serialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct StorageEntry {
     name: String,
@@ -34,11 +34,19 @@ struct StorageEntry {
     protection_reason: Option<String>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct DiskSummary {
     total: u64,
     available: u64,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedScan {
+    entries: Vec<StorageEntry>,
+    summary: DiskSummary,
+    saved_at: u64,
 }
 
 #[derive(Serialize, Clone)]
@@ -200,6 +208,51 @@ fn home_dir() -> Result<PathBuf, String> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or_else(|| "Could not find the current home directory.".into())
+}
+
+fn scan_cache_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Could not locate MemRead data: {error}"))?;
+    fs::create_dir_all(&data_dir)
+        .map_err(|error| format!("Could not create MemRead data: {error}"))?;
+    Ok(data_dir.join("scan-cache.json"))
+}
+
+#[tauri::command]
+fn load_scan_cache(app: tauri::AppHandle) -> Result<Option<PersistedScan>, String> {
+    let path = scan_cache_path(&app)?;
+    let contents = match fs::read(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("Could not read the saved scan: {error}")),
+    };
+    serde_json::from_slice(&contents)
+        .map(Some)
+        .map_err(|_| "The saved scan is unreadable. Run a new scan to replace it.".into())
+}
+
+#[tauri::command]
+fn save_scan_cache(
+    app: tauri::AppHandle,
+    entries: Vec<StorageEntry>,
+    summary: DiskSummary,
+) -> Result<(), String> {
+    let path = scan_cache_path(&app)?;
+    let contents = serde_json::to_vec(&PersistedScan {
+        entries,
+        summary,
+        saved_at: std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    })
+    .map_err(|error| format!("Could not prepare the saved scan: {error}"))?;
+    let temporary = path.with_extension("tmp");
+    fs::write(&temporary, contents).map_err(|error| format!("Could not save the scan: {error}"))?;
+    fs::rename(&temporary, path)
+        .map_err(|error| format!("Could not finalize the saved scan: {error}"))
 }
 
 // Sequoia/Tahoe protects these containers independently of Full Disk Access.
@@ -1000,6 +1053,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             scan_storage,
             measure_storage,
+            load_scan_cache,
+            save_scan_cache,
             disk_summary,
             cleanup_shortcuts,
             inspect_cleanup_path,

@@ -60,6 +60,12 @@ interface DiskSummary {
   available: number;
 }
 
+interface PersistedScan {
+  entries: StorageEntry[];
+  savedAt: number;
+  summary: DiskSummary;
+}
+
 interface ScanProgress {
   scanId: number;
   current: string;
@@ -98,6 +104,8 @@ interface StorageExplorer {
   selectedEntry: TrashTarget | null;
   summary: DiskSummary | null;
   trail: string[];
+  scanElapsedMs: number | null;
+  timingEnabled: boolean;
   verifyingAccess: boolean;
   dismissNotice: () => void;
   goBack: () => void;
@@ -106,6 +114,7 @@ interface StorageExplorer {
   scan: (path?: string, force?: boolean) => Promise<void>;
   scanBreadcrumb: (index: number) => void;
   scanHome: () => void;
+  toggleTiming: () => void;
   selectEntry: (entry: TrashTarget | null) => void;
   setQuery: (value: string) => void;
   verifyAccess: () => Promise<void>;
@@ -124,8 +133,10 @@ interface IconProps extends SVGProps<SVGSVGElement> {
     | "arrow"
     | "back"
     | "chevron"
+    | "copy"
     | "drive"
     | "folder"
+    | "bookmark"
     | "menu"
     | "more"
     | "overview"
@@ -178,6 +189,13 @@ function formatBytes(bytes: number): string {
   }
 
   return (value >= 10 ? value.toFixed(0) : value.toFixed(1)) + " " + BYTE_UNITS[unitIndex];
+}
+
+function formatDuration(milliseconds: number): string {
+  if (milliseconds < 1000) {
+    return Math.round(milliseconds) + " ms";
+  }
+  return (milliseconds / 1000).toFixed(milliseconds < 10_000 ? 1 : 0) + " sec";
 }
 
 function formatModifiedDate(timestamp: number): string {
@@ -257,6 +275,8 @@ function Icon({ name, ...props }: IconProps) {
         <path d="M19 8V4m0 0h-4m4 0-3 3a7 7 0 1 0 2.1 5M5 16v4m0 0h4m-4 0 3-3a7 7 0 0 0-2.1-5" />
       )}
       {name === "chevron" && <path d="m9 18 6-6-6-6" />}
+      {name === "copy" && <><rect height="13" rx="1" width="11" x="9" y="8" /><path d="M5 16V5a1 1 0 0 1 1-1h9" /></>}
+      {name === "bookmark" && <path d="M7 4h10a1 1 0 0 1 1 1v15l-6-3.5L6 20V5a1 1 0 0 1 1-1Z" />}
       {name === "back" && <path d="m15 18-6-6 6-6" />}
       {name === "trash" && (
         <>
@@ -281,6 +301,8 @@ function useStorageExplorer(autoScan: boolean): StorageExplorer {
   const scanIdRef = useRef(0);
   const scanPaths = useRef(new Map<number, string>());
   const directoryCache = useRef(new Map<string, DirectoryCache>());
+  const scanStartedAtRef = useRef<number | null>(null);
+  const scanTimerRef = useRef<number | null>(null);
   const [isReady, setIsReady] = useState(
     () => localStorage.getItem("memread-setup-v2") === "yes",
   );
@@ -293,6 +315,11 @@ function useStorageExplorer(autoScan: boolean): StorageExplorer {
   const [query, setQuery] = useState("");
   const [isScanning, setIsScanning] = useState(false);
   const [calculating, setCalculating] = useState(false);
+  const [cacheReady, setCacheReady] = useState(false);
+  const [scanElapsedMs, setScanElapsedMs] = useState<number | null>(null);
+  const [timingEnabled, setTimingEnabled] = useState(
+    () => localStorage.getItem("memread-debug-timing") === "yes",
+  );
   const [scanProgress, setScanProgress] = useState<ScanProgress>({
     completed: 0,
     current: "Waiting to scan",
@@ -304,6 +331,33 @@ function useStorageExplorer(autoScan: boolean): StorageExplorer {
   const [moving, setMoving] = useState(false);
   const [notice, setNotice] = useState("");
   const hasAutoScanned = useRef(false);
+  const restoredCache = useRef(false);
+
+  function stopScanTimer(): void {
+    if (scanTimerRef.current !== null) {
+      window.clearInterval(scanTimerRef.current);
+      scanTimerRef.current = null;
+    }
+    if (scanStartedAtRef.current !== null) {
+      setScanElapsedMs(performance.now() - scanStartedAtRef.current);
+      scanStartedAtRef.current = null;
+    }
+  }
+
+  function startScanTimer(): void {
+    if (!timingEnabled) {
+      setScanElapsedMs(null);
+      return;
+    }
+    stopScanTimer();
+    scanStartedAtRef.current = performance.now();
+    setScanElapsedMs(0);
+    scanTimerRef.current = window.setInterval(() => {
+      if (scanStartedAtRef.current !== null) {
+        setScanElapsedMs(performance.now() - scanStartedAtRef.current);
+      }
+    }, 100);
+  }
 
   function cacheKey(path: string): string {
     return path || "__home__";
@@ -315,6 +369,7 @@ function useStorageExplorer(autoScan: boolean): StorageExplorer {
       scanId,
     }).catch((error: unknown) => {
       if (scanId === scanIdRef.current) {
+        stopScanTimer();
         setCalculating(false);
         setNotice(errorMessage(error));
       }
@@ -354,10 +409,17 @@ function useStorageExplorer(autoScan: boolean): StorageExplorer {
 
       if (payload.total > 0 && payload.completed === payload.total) {
         setCalculating(false);
+        stopScanTimer();
         if (key) {
           const cached = directoryCache.current.get(key);
           if (cached) {
             cached.isComplete = true;
+            if (key === "__home__" && cached.summary) {
+              void invoke<void>("save_scan_cache", {
+                entries: cached.entries,
+                summary: cached.summary,
+              }).catch(() => undefined);
+            }
           }
         }
         void notifyIfAllowed(
@@ -398,17 +460,53 @@ function useStorageExplorer(autoScan: boolean): StorageExplorer {
     return () => {
       stopProgress?.();
       stopSizes?.();
+      if (scanTimerRef.current !== null) {
+        window.clearInterval(scanTimerRef.current);
+      }
     };
   }, []);
 
   useEffect(() => {
-    if (!autoScan || !isReady || hasAutoScanned.current) {
+    if (!isReady || restoredCache.current) {
+      return;
+    }
+    restoredCache.current = true;
+    void invoke<PersistedScan | null>("load_scan_cache")
+      .then((cached) => {
+        if (!cached || !cached.entries.length) {
+          return;
+        }
+        const progress = {
+          completed: cached.entries.length,
+          current: "Restored saved scan",
+          scanId: 0,
+          total: cached.entries.length,
+        };
+        directoryCache.current.set("__home__", {
+          activity: [],
+          entries: cached.entries,
+          isComplete: true,
+          progress,
+          summary: cached.summary,
+        });
+        hasAutoScanned.current = true;
+        setEntries(cached.entries);
+        setSummary(cached.summary);
+        setRoot("");
+        setScanProgress(progress);
+      })
+      .catch(() => undefined)
+      .finally(() => setCacheReady(true));
+  }, [isReady]);
+
+  useEffect(() => {
+    if (!autoScan || !isReady || !cacheReady || hasAutoScanned.current) {
       return;
     }
 
     hasAutoScanned.current = true;
     void scan();
-  }, [autoScan, isReady]);
+  }, [autoScan, cacheReady, isReady]);
 
   async function scan(path = root, force = false): Promise<void> {
     const scanId = ++scanIdRef.current;
@@ -432,6 +530,7 @@ function useStorageExplorer(autoScan: boolean): StorageExplorer {
 
     setIsScanning(true);
     setCalculating(true);
+    startScanTimer();
     setEntries([]);
     setScanActivity([]);
     setScanProgress({
@@ -477,6 +576,7 @@ function useStorageExplorer(autoScan: boolean): StorageExplorer {
       beginMeasurement(path, scanId);
     } catch (error) {
       if (scanId === scanIdRef.current) {
+        stopScanTimer();
         setCalculating(false);
         setIsScanning(false);
         setNotice(errorMessage(error));
@@ -575,12 +675,24 @@ function useStorageExplorer(autoScan: boolean): StorageExplorer {
     scanBreadcrumb,
     scanHome,
     scanActivity,
+    scanElapsedMs,
     scanProgress,
     selectedEntry,
     selectEntry: setSelectedEntry,
     setQuery,
     summary,
     trail,
+    timingEnabled,
+    toggleTiming: () => {
+      setTimingEnabled((enabled) => {
+        const next = !enabled;
+        if (!next) {
+          stopScanTimer();
+        }
+        localStorage.setItem("memread-debug-timing", next ? "yes" : "no");
+        return next;
+      });
+    },
     verifyingAccess,
     verifyAccess,
   };
@@ -1015,18 +1127,29 @@ function SetupView({
 interface DashboardHeaderProps {
   calculating: boolean;
   isScanning: boolean;
+  onToggleTiming: () => void;
+  scanElapsedMs: number | null;
   summary: DiskSummary | null;
+  timingEnabled: boolean;
   onScan: () => Promise<void>;
 }
 
-function DashboardHeader({ calculating, isScanning, summary, onScan }: DashboardHeaderProps) {
+function DashboardHeader({
+  calculating,
+  isScanning,
+  onScan,
+  onToggleTiming,
+  scanElapsedMs,
+  summary,
+  timingEnabled,
+}: DashboardHeaderProps) {
   const used = summary ? summary.total - summary.available : 0;
   const usedPercent = summary ? (used / summary.total) * 100 : 0;
   const buttonLabel = isScanning
     ? "Opening..."
     : calculating
       ? "Scanning in background"
-      : "Scan now";
+      : "Full rescan";
 
   return (
     <header>
@@ -1040,6 +1163,13 @@ function DashboardHeader({ calculating, isScanning, summary, onScan }: Dashboard
       </div>
       <button className="scan" disabled={isScanning} onClick={() => void onScan()}>
         {buttonLabel}
+      </button>
+      <button className={timingEnabled ? "debug-timing enabled" : "debug-timing"} onClick={onToggleTiming}>
+        {timingEnabled
+          ? scanElapsedMs === null
+            ? "Debug timing: on"
+            : "Full scan: " + formatDuration(scanElapsedMs)
+          : "Debug timing: off"}
       </button>
     </header>
   );
@@ -1161,10 +1291,12 @@ function DiskMap({ entries, onOpenFolder, summary }: DiskMapProps) {
 
 interface ScanProgressPanelProps {
   activity: string[];
+  elapsedMs: number | null;
   progress: ScanProgress;
+  timingEnabled: boolean;
 }
 
-function ScanProgressPanel({ activity, progress }: ScanProgressPanelProps) {
+function ScanProgressPanel({ activity, elapsedMs, progress, timingEnabled }: ScanProgressPanelProps) {
   const percent = progress.total
     ? Math.max(4, Math.min(100, (progress.completed / progress.total) * 100))
     : 4;
@@ -1179,6 +1311,7 @@ function ScanProgressPanel({ activity, progress }: ScanProgressPanelProps) {
         <span>
           {progress.total ? progress.completed + " of " + progress.total + " items" : "Preparing..."}
         </span>
+        {timingEnabled && elapsedMs !== null && <em>Elapsed {formatDuration(elapsedMs)}</em>}
         <i style={{ width: percent + "%" }} />
       </div>
       <div className="scan-activity">
@@ -1206,7 +1339,6 @@ interface ExplorerTableProps {
   onOpenFolder: (entry: StorageEntry) => void;
   onQueryChange: (value: string) => void;
   onSelectForTrash: (entry: StorageEntry) => void;
-  onScanBreadcrumb: (index: number) => void;
   onScanHome: () => void;
 }
 
@@ -1219,7 +1351,6 @@ function ExplorerTable({
   onOpenFolder,
   onQueryChange,
   onSelectForTrash,
-  onScanBreadcrumb,
   onScanHome,
 }: ExplorerTableProps) {
   const [sort, setSort] = useState<SortState>(DEFAULT_SORT);
@@ -1229,7 +1360,7 @@ function ExplorerTable({
     (entry.name + " " + entry.category + " " + entry.path).toLowerCase().includes(normalizedQuery),
   );
   const sortedEntries = [...filteredEntries].sort((left, right) => compareEntries(left, right, sort));
-  const breadcrumbPaths = [...trail, root].filter(Boolean);
+  const currentFolder = root.split("/").filter(Boolean).pop();
 
   function changeSort(key: SortKey): void {
     setSort((currentSort) => ({
@@ -1251,14 +1382,9 @@ function ExplorerTable({
         </button>
         <div className="crumb">
           <button onClick={onScanHome}>Home</button>
-          {breadcrumbPaths.map((path, index) => (
-            <span key={path}>
-              <Icon name="chevron" />
-              <button onClick={() => onScanBreadcrumb(index)}>
-                {path.split("/").pop()}
-              </button>
-            </span>
-          ))}
+          {root && <Icon name="chevron" />}
+          {trail.length > 1 && <span className="crumb-ellipsis">…</span>}
+          {currentFolder && <button className="current-crumb" title={root}>{currentFolder}</button>}
         </div>
         <label className="search">
           <Icon name="search" />
@@ -1327,10 +1453,18 @@ function BrowserRow({ entry, onOpenFolder, onSelectForTrash }: BrowserRowProps) 
   const canOpen = entry.kind === "Folder";
   const canTrash = entry.deletable && entry.size !== null;
   const [showActions, setShowActions] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [showShortcutDialog, setShowShortcutDialog] = useState(false);
 
   function finderAction(action: "open" | "quick-look" | "reveal"): void {
     setShowActions(false);
     void invoke<void>("finder_action", { action, path: entry.path });
+  }
+
+  async function copyPath(): Promise<void> {
+    await navigator.clipboard.writeText(entry.path);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1600);
   }
 
   return (
@@ -1363,6 +1497,24 @@ function BrowserRow({ entry, onOpenFolder, onSelectForTrash }: BrowserRowProps) 
       </strong>
       <div className="row-actions">
         <button
+          aria-label={"Copy path for " + entry.name}
+          className={copied ? "utility-action copied" : "utility-action"}
+          onClick={() => void copyPath()}
+          title={copied ? "Path copied" : "Copy path"}
+        >
+          <Icon name="copy" />
+        </button>
+        {canOpen && (
+          <button
+            aria-label={"Create cleanup shortcut for " + entry.name}
+            className="utility-action"
+            onClick={() => setShowShortcutDialog(true)}
+            title="Create cleanup shortcut"
+          >
+            <Icon name="bookmark" />
+          </button>
+        )}
+        <button
           aria-expanded={showActions}
           aria-label={"Actions for " + entry.name}
           className="more-actions"
@@ -1384,7 +1536,58 @@ function BrowserRow({ entry, onOpenFolder, onSelectForTrash }: BrowserRowProps) 
           </span>
         )}
       </div>
+      {showShortcutDialog && (
+        <ShortcutDialog entry={entry} onClose={() => setShowShortcutDialog(false)} />
+      )}
     </article>
+  );
+}
+
+function ShortcutDialog({ entry, onClose }: { entry: StorageEntry; onClose: () => void }) {
+  const [name, setName] = useState(entry.name);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function save(): Promise<void> {
+    setSaving(true);
+    setError("");
+    try {
+      const inspected = await invoke<CleanupShortcut>("inspect_cleanup_path", { path: entry.path });
+      const path = inspected.path ?? entry.path;
+      const saved = readSavedCleanupShortcuts();
+      localStorage.setItem(
+        "memread-cleanup-shortcuts",
+        JSON.stringify([...saved.filter((shortcut) => shortcut.path !== path), { name: name.trim() || inspected.name, path }]),
+      );
+      onClose();
+    } catch (reason) {
+      setError(errorMessage(reason));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="veil">
+      <section aria-busy={saving} aria-modal="true" className="modal shortcut-modal" role="dialog">
+        <Icon className="modal-icon" name="bookmark" />
+        <p className="kicker">CREATE SHORTCUT</p>
+        <h2>Keep this cleanup close.</h2>
+        <p>MemRead will measure this folder from Quick Cleanups before anything can move to Trash.</p>
+        <label>
+          Shortcut name
+          <input autoFocus onChange={(event) => setName(event.target.value)} value={name} />
+        </label>
+        <code>{entry.path}</code>
+        {error && <p className="shortcut-error">{error}</p>}
+        <div>
+          <button disabled={saving} onClick={onClose}>Cancel</button>
+          <button className="primary" disabled={saving} onClick={() => void save()}>
+            {saving ? "Saving…" : "Save shortcut"}
+          </button>
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -1832,10 +2035,18 @@ function Dashboard({ explorer }: { explorer: StorageExplorer }) {
           calculating={explorer.calculating}
           isScanning={explorer.isScanning}
           onScan={() => explorer.scan(undefined, true)}
+          onToggleTiming={explorer.toggleTiming}
+          scanElapsedMs={explorer.scanElapsedMs}
           summary={explorer.summary}
+          timingEnabled={explorer.timingEnabled}
         />
         {explorer.calculating && (
-          <ScanProgressPanel activity={explorer.scanActivity} progress={explorer.scanProgress} />
+          <ScanProgressPanel
+            activity={explorer.scanActivity}
+            elapsedMs={explorer.scanElapsedMs}
+            progress={explorer.scanProgress}
+            timingEnabled={explorer.timingEnabled}
+          />
         )}
         {view === "overview" && (
           <Overview
@@ -1867,7 +2078,6 @@ function Dashboard({ explorer }: { explorer: StorageExplorer }) {
               onBack={explorer.goBack}
               onOpenFolder={openFolder}
               onQueryChange={explorer.setQuery}
-              onScanBreadcrumb={explorer.scanBreadcrumb}
               onScanHome={explorer.scanHome}
               onSelectForTrash={explorer.selectEntry}
               query={explorer.query}
