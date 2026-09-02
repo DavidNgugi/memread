@@ -107,6 +107,8 @@ interface IconProps extends SVGProps<SVGSVGElement> {
     | "chevron"
     | "drive"
     | "folder"
+    | "menu"
+    | "overview"
     | "search"
     | "shield"
     | "sortAsc"
@@ -195,6 +197,13 @@ function Icon({ name, ...props }: IconProps) {
       )}
       {name === "folder" && (
         <path d="M3 6.8A1.8 1.8 0 0 1 4.8 5H10l2 2h7.2A1.8 1.8 0 0 1 21 8.8v8.4a1.8 1.8 0 0 1-1.8 1.8H4.8A1.8 1.8 0 0 1 3 17.2Z" />
+      )}
+      {name === "menu" && <path d="M5 7h14M5 12h14M5 17h14" />}
+      {name === "overview" && (
+        <>
+          <circle cx="12" cy="12" r="8.5" />
+          <path d="M12 3.5V12h8.5" />
+        </>
       )}
       {name === "chevron" && <path d="m9 18 6-6-6-6" />}
       {name === "back" && <path d="m15 18-6-6 6-6" />}
@@ -778,9 +787,7 @@ function DashboardHeader({ calculating, isScanning, summary, onScan }: Dashboard
 
   return (
     <header>
-      <div className="wordmark">
-        <span>MEM</span>READ
-      </div>
+      <p className="dashboard-context">STORAGE WORKSPACE</p>
       <div className="capacity">
         <span>AVAILABLE</span>
         <b>
@@ -1225,46 +1232,176 @@ function CleanupShortcuts({ onSelectForTrash }: CleanupShortcutsProps) {
   );
 }
 
-function Dashboard({ explorer }: { explorer: StorageExplorer }) {
+type DashboardView = "cleanups" | "explorer" | "overview";
+
+interface SidebarProps {
+  collapsed: boolean;
+  currentView: DashboardView;
+  onCollapse: () => void;
+  onNavigate: (view: DashboardView) => void;
+}
+
+function Sidebar({ collapsed, currentView, onCollapse, onNavigate }: SidebarProps) {
+  const navigation: { icon: IconProps["name"]; label: string; view: DashboardView }[] = [
+    { icon: "overview", label: "Overview", view: "overview" },
+    { icon: "folder", label: "Explorer", view: "explorer" },
+    { icon: "trash", label: "Cleanups", view: "cleanups" },
+  ];
+
   return (
-    <main className="app">
-      <DashboardHeader
-        calculating={explorer.calculating}
-        isScanning={explorer.isScanning}
-        onScan={explorer.scan}
-        summary={explorer.summary}
-      />
-      {explorer.calculating && (
-        <ScanProgressPanel activity={explorer.scanActivity} progress={explorer.scanProgress} />
-      )}
-      <StorageCapacityBar summary={explorer.summary} />
-      <CleanupShortcuts onSelectForTrash={explorer.selectEntry} />
-      {explorer.notice && (
-        <button className="toast" onClick={explorer.dismissNotice}>
-          {explorer.notice} ×
+    <aside className={collapsed ? "sidebar collapsed" : "sidebar"}>
+      <div className="sidebar-brand">
+        <span className="sidebar-mark"><span>MEM</span>READ</span>
+        <button aria-label={collapsed ? "Expand navigation" : "Collapse navigation"} onClick={onCollapse}>
+          <Icon name="menu" />
         </button>
-      )}
-      <ExplorerTable
-        entries={explorer.entries}
-        onBack={explorer.goBack}
-        onOpenFolder={explorer.openFolder}
-        onQueryChange={explorer.setQuery}
-        onScanBreadcrumb={explorer.scanBreadcrumb}
-        onScanHome={explorer.scanHome}
-        onSelectForTrash={explorer.selectEntry}
-        query={explorer.query}
-        root={explorer.root}
-        trail={explorer.trail}
+      </div>
+      <nav aria-label="Dashboard views">
+        {navigation.map((item) => (
+          <button
+            aria-current={currentView === item.view ? "page" : undefined}
+            aria-label={collapsed ? item.label : undefined}
+            className={currentView === item.view ? "nav-item active" : "nav-item"}
+            key={item.view}
+            onClick={() => onNavigate(item.view)}
+          >
+            <Icon name={item.icon} />
+            <span>{item.label}</span>
+          </button>
+        ))}
+      </nav>
+      {!collapsed && <p className="sidebar-note">LOCAL-ONLY STORAGE MAP</p>}
+    </aside>
+  );
+}
+
+function Overview({ explorer, onExplore, onCleanups }: {
+  explorer: StorageExplorer;
+  onCleanups: () => void;
+  onExplore: () => void;
+}) {
+  const measuredEntries = explorer.entries.filter((entry) => entry.size !== null);
+  const largest = [...measuredEntries]
+    .sort((left, right) => compareEntries(left, right, DEFAULT_SORT))
+    .slice(0, 4);
+
+  return (
+    <section className="overview-view">
+      <div className="overview-heading">
+        <div>
+          <p className="kicker">YOUR MAC, READABLE</p>
+          <h1>Space with context.</h1>
+        </div>
+        <p>
+          Scan your home folder once, then move through results without waiting for the next
+          directory to be sized.
+        </p>
+      </div>
+      <StorageCapacityBar summary={explorer.summary} />
+      <section className="overview-largest" aria-labelledby="largest-title">
+        <div className="overview-section-head">
+          <div>
+            <p className="kicker">TOP SPACE USERS</p>
+            <h2 id="largest-title">Largest folders at home</h2>
+          </div>
+          <button onClick={onExplore}>Open explorer <Icon name="arrow" /></button>
+        </div>
+        {largest.length ? (
+          <div className="overview-list">
+            {largest.map((entry, index) => (
+              <button key={entry.path} onClick={() => explorer.openFolder(entry)}>
+                <span>0{index + 1}</span>
+                <b>{entry.name}</b>
+                <small>{entry.size === null ? "Calculating" : formatBytes(entry.size)}</small>
+                <Icon name="chevron" />
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p className="overview-empty">
+            {explorer.calculating ? "Measuring the first folders now…" : "Run a scan to reveal the largest folders."}
+          </p>
+        )}
+      </section>
+      <section className="overview-action">
+        <div>
+          <p className="kicker">SAFE CLEANUP</p>
+          <h2>Common developer caches, contained.</h2>
+          <p>Review measured Xcode and package-manager caches before anything moves to Trash.</p>
+        </div>
+        <button onClick={onCleanups}>View cleanups <Icon name="arrow" /></button>
+      </section>
+    </section>
+  );
+}
+
+function Dashboard({ explorer }: { explorer: StorageExplorer }) {
+  const [view, setView] = useState<DashboardView>("overview");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+
+  function openFolder(entry: StorageEntry): void {
+    explorer.openFolder(entry);
+    setView("explorer");
+  }
+
+  return (
+    <div className={sidebarCollapsed ? "dashboard-shell sidebar-is-collapsed" : "dashboard-shell"}>
+      <Sidebar
+        collapsed={sidebarCollapsed}
+        currentView={view}
+        onCollapse={() => setSidebarCollapsed((collapsed) => !collapsed)}
+        onNavigate={setView}
       />
-      {explorer.selectedEntry && (
-        <TrashDialog
-          entry={explorer.selectedEntry}
-          moving={explorer.moving}
-          onCancel={() => explorer.selectEntry(null)}
-          onConfirm={explorer.moveSelectedToTrash}
+      <main className="app">
+        <DashboardHeader
+          calculating={explorer.calculating}
+          isScanning={explorer.isScanning}
+          onScan={explorer.scan}
+          summary={explorer.summary}
         />
-      )}
-    </main>
+        {explorer.calculating && (
+          <ScanProgressPanel activity={explorer.scanActivity} progress={explorer.scanProgress} />
+        )}
+        {view === "overview" && (
+          <Overview
+            explorer={{ ...explorer, openFolder }}
+            onCleanups={() => setView("cleanups")}
+            onExplore={() => setView("explorer")}
+          />
+        )}
+        {view === "explorer" && (
+          <>
+            <StorageCapacityBar summary={explorer.summary} />
+            <ExplorerTable
+              entries={explorer.entries}
+              onBack={explorer.goBack}
+              onOpenFolder={openFolder}
+              onQueryChange={explorer.setQuery}
+              onScanBreadcrumb={explorer.scanBreadcrumb}
+              onScanHome={explorer.scanHome}
+              onSelectForTrash={explorer.selectEntry}
+              query={explorer.query}
+              root={explorer.root}
+              trail={explorer.trail}
+            />
+          </>
+        )}
+        {view === "cleanups" && <CleanupShortcuts onSelectForTrash={explorer.selectEntry} />}
+        {explorer.notice && (
+          <button className="toast" onClick={explorer.dismissNotice}>
+            {explorer.notice} ×
+          </button>
+        )}
+        {explorer.selectedEntry && (
+          <TrashDialog
+            entry={explorer.selectedEntry}
+            moving={explorer.moving}
+            onCancel={() => explorer.selectEntry(null)}
+            onConfirm={explorer.moveSelectedToTrash}
+          />
+        )}
+      </main>
+    </div>
   );
 }
 
