@@ -1,5 +1,6 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
+    collections::BTreeMap,
     fs, io,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
@@ -59,6 +60,25 @@ struct CleanupDefinition {
     caution: &'static str,
     path: Option<PathBuf>,
     action: &'static str,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SimulatorDevice {
+    id: String,
+    name: String,
+    runtime: String,
+}
+
+#[derive(Deserialize)]
+struct SimctlDeviceList {
+    devices: BTreeMap<String, Vec<SimctlDevice>>,
+}
+
+#[derive(Deserialize)]
+struct SimctlDevice {
+    name: String,
+    udid: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -699,19 +719,78 @@ async fn inspect_cleanup_path(path: String) -> Result<CleanupShortcut, String> {
         .map_err(|error| format!("The cleanup inspection worker stopped unexpectedly: {error}"))?
 }
 
-#[tauri::command]
-async fn run_cleanup_shortcut(id: String) -> Result<String, String> {
-    if id != "unavailable-simulators" {
-        return Err("That cleanup is moved to Trash from the dashboard.".into());
+fn display_runtime(runtime: &str) -> String {
+    runtime
+        .rsplit('.')
+        .next()
+        .unwrap_or(runtime)
+        .replace("SimRuntime-", "")
+        .replace('-', ".")
+}
+
+fn unavailable_simulators_sync() -> Result<Vec<SimulatorDevice>, String> {
+    let output = Command::new("xcrun")
+        .args(["simctl", "list", "devices", "unavailable", "-j"])
+        .output()
+        .map_err(|error| format!("Could not read Simulator devices: {error}"))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            "Simulator device discovery did not complete.".into()
+        } else {
+            format!("Simulator device discovery did not complete: {detail}")
+        });
     }
 
-    tauri::async_runtime::spawn_blocking(|| {
+    let list: SimctlDeviceList = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("Simulator returned an unreadable device list: {error}"))?;
+    Ok(list
+        .devices
+        .into_iter()
+        .flat_map(|(runtime, devices)| {
+            devices.into_iter().map(move |device| SimulatorDevice {
+                id: device.udid,
+                name: device.name,
+                runtime: display_runtime(&runtime),
+            })
+        })
+        .collect())
+}
+
+#[tauri::command]
+async fn unavailable_simulators() -> Result<Vec<SimulatorDevice>, String> {
+    tauri::async_runtime::spawn_blocking(unavailable_simulators_sync)
+        .await
+        .map_err(|error| format!("The simulator discovery worker stopped unexpectedly: {error}"))?
+}
+
+#[tauri::command]
+async fn run_cleanup_shortcut(id: String, device_ids: Vec<String>) -> Result<String, String> {
+    if id != "unavailable-simulators" || device_ids.is_empty() {
+        return Err("Select at least one unavailable simulator to remove.".into());
+    }
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let available_ids = unavailable_simulators_sync()?
+            .into_iter()
+            .map(|device| device.id)
+            .collect::<Vec<_>>();
+        if device_ids.iter().any(|id| !available_ids.contains(id)) {
+            return Err("One or more selected simulators are no longer unavailable. Refresh the list and try again.".into());
+        }
+
         let output = Command::new("xcrun")
-            .args(["simctl", "delete", "unavailable"])
+            .arg("simctl")
+            .arg("delete")
+            .args(&device_ids)
             .output()
             .map_err(|error| format!("Could not run Simulator cleanup: {error}"))?;
         if output.status.success() {
-            Ok("Unavailable simulators have been removed.".into())
+            Ok(format!(
+                "{} unavailable simulator{} removed.",
+                device_ids.len(),
+                if device_ids.len() == 1 { "" } else { "s" }
+            ))
         } else {
             let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
             Err(if detail.is_empty() {
@@ -857,6 +936,7 @@ pub fn run() {
             disk_summary,
             cleanup_shortcuts,
             inspect_cleanup_path,
+            unavailable_simulators,
             run_cleanup_shortcut,
             quick_glance_snapshot,
             move_to_trash,

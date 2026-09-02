@@ -44,6 +44,12 @@ interface SavedCleanupShortcut {
   path: string;
 }
 
+interface SimulatorDevice {
+  id: string;
+  name: string;
+  runtime: string;
+}
+
 interface DiskSummary {
   total: number;
   available: number;
@@ -482,6 +488,7 @@ function useCleanupShortcuts() {
   const [saved, setSaved] = useState<SavedCleanupShortcut[]>(readSavedCleanupShortcuts);
   const [isLoading, setIsLoading] = useState(true);
   const [checkingId, setCheckingId] = useState<string | null>(null);
+  const autoMeasuredPaths = useRef(new Set<string>());
 
   useEffect(() => {
     localStorage.setItem("memread-cleanup-shortcuts", JSON.stringify(saved));
@@ -519,6 +526,51 @@ function useCleanupShortcuts() {
     };
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    const pending = shortcuts.filter(
+      (shortcut) =>
+        shortcut.action === "trash" &&
+        shortcut.available &&
+        shortcut.path !== null &&
+        shortcut.size === null &&
+        !autoMeasuredPaths.current.has(shortcut.path),
+    );
+
+    async function measurePendingShortcuts(): Promise<void> {
+      for (const shortcut of pending) {
+        if (!shortcut.path || cancelled) {
+          return;
+        }
+        autoMeasuredPaths.current.add(shortcut.path);
+        setCheckingId(shortcut.id);
+        try {
+          const inspected = await invoke<CleanupShortcut>("inspect_cleanup_path", {
+            path: shortcut.path,
+          });
+          if (!cancelled) {
+            setShortcuts((items) =>
+              items.map((item) =>
+                item.id === shortcut.id ? { ...inspected, ...shortcut, size: inspected.size } : item,
+              ),
+            );
+          }
+        } catch {
+          // A missing cache is simply left without a reclaimable size.
+        } finally {
+          if (!cancelled) {
+            setCheckingId(null);
+          }
+        }
+      }
+    }
+
+    void measurePendingShortcuts();
+    return () => {
+      cancelled = true;
+    };
+  }, [shortcuts]);
+
   async function checkSpace(shortcut: CleanupShortcut): Promise<void> {
     if (!shortcut.path) {
       return;
@@ -528,7 +580,9 @@ function useCleanupShortcuts() {
     try {
       const inspected = await invoke<CleanupShortcut>("inspect_cleanup_path", { path: shortcut.path });
       setShortcuts((items) =>
-        items.map((item) => (item.id === shortcut.id ? { ...shortcut, ...inspected } : item)),
+        items.map((item) =>
+          item.id === shortcut.id ? { ...inspected, ...shortcut, size: inspected.size } : item,
+        ),
       );
     } finally {
       setCheckingId(null);
@@ -1099,6 +1153,9 @@ function CleanupShortcuts({ onSelectForTrash }: CleanupShortcutsProps) {
   const [customPath, setCustomPath] = useState("");
   const [message, setMessage] = useState("");
   const [runningSimulatorCleanup, setRunningSimulatorCleanup] = useState(false);
+  const [loadingSimulators, setLoadingSimulators] = useState(false);
+  const [simulatorDevices, setSimulatorDevices] = useState<SimulatorDevice[]>([]);
+  const [selectedSimulatorIds, setSelectedSimulatorIds] = useState<string[]>([]);
   const [showSimulatorConfirmation, setShowSimulatorConfirmation] = useState(false);
 
   async function saveCustomShortcut(): Promise<void> {
@@ -1116,13 +1173,41 @@ function CleanupShortcuts({ onSelectForTrash }: CleanupShortcutsProps) {
   async function removeUnavailableSimulators(): Promise<void> {
     setRunningSimulatorCleanup(true);
     try {
-      setMessage(await invoke<string>("run_cleanup_shortcut", { id: "unavailable-simulators" }));
+      setMessage(await invoke<string>("run_cleanup_shortcut", {
+        id: "unavailable-simulators",
+        deviceIds: selectedSimulatorIds,
+      }));
       setShowSimulatorConfirmation(false);
     } catch (error) {
       setMessage(errorMessage(error));
     } finally {
       setRunningSimulatorCleanup(false);
     }
+  }
+
+  async function reviewUnavailableSimulators(): Promise<void> {
+    setLoadingSimulators(true);
+    setMessage("");
+    try {
+      const devices = await invoke<SimulatorDevice[]>("unavailable_simulators");
+      if (!devices.length) {
+        setMessage("No unavailable simulator devices were found.");
+        return;
+      }
+      setSimulatorDevices(devices);
+      setSelectedSimulatorIds(devices.map((device) => device.id));
+      setShowSimulatorConfirmation(true);
+    } catch (error) {
+      setMessage(errorMessage(error));
+    } finally {
+      setLoadingSimulators(false);
+    }
+  }
+
+  function toggleSimulator(id: string): void {
+    setSelectedSimulatorIds((ids) =>
+      ids.includes(id) ? ids.filter((selectedId) => selectedId !== id) : [...ids, id],
+    );
   }
 
   return (
@@ -1143,7 +1228,11 @@ function CleanupShortcuts({ onSelectForTrash }: CleanupShortcutsProps) {
                 <p className="cleanup-kind">{shortcut.action === "simctl" ? "SIMULATOR TOOL" : "FOLDER"}</p>
                 <h3>{shortcut.name}</h3>
               </div>
-              {shortcut.size !== null && <b>{formatBytes(shortcut.size)}</b>}
+              {shortcut.size !== null ? (
+                <b>{formatBytes(shortcut.size)}</b>
+              ) : checkingId === shortcut.id ? (
+                <b>Checking…</b>
+              ) : null}
             </div>
             <p>{shortcut.description}</p>
             <small>{shortcut.caution}</small>
@@ -1174,10 +1263,10 @@ function CleanupShortcuts({ onSelectForTrash }: CleanupShortcutsProps) {
               {shortcut.action === "simctl" && (
                 <button
                   className="cleanup-tool"
-                  disabled={runningSimulatorCleanup}
-                  onClick={() => setShowSimulatorConfirmation(true)}
+                  disabled={runningSimulatorCleanup || loadingSimulators}
+                  onClick={() => void reviewUnavailableSimulators()}
                 >
-                  Remove unavailable
+                  {loadingSimulators ? "Checking…" : "Review devices"}
                 </button>
               )}
               {shortcut.id.startsWith("custom:") && (
@@ -1212,17 +1301,39 @@ function CleanupShortcuts({ onSelectForTrash }: CleanupShortcutsProps) {
           <section aria-busy={runningSimulatorCleanup} aria-modal="true" className="modal" role="dialog">
             <Icon className="modal-icon" name="drive" />
             <p className="kicker">SIMULATOR CLEANUP</p>
-            <h2>Remove unavailable simulators?</h2>
+            <h2>Choose simulators to remove.</h2>
             <p>
-              MemRead will ask Apple’s Simulator tool to remove devices whose runtime is no longer installed.
-              Your active iPhone and iPad simulator runtimes are not touched.
+              These devices have no installed runtime. Your active iPhone and iPad simulators are
+              not listed here.
             </p>
+            <div className="simulator-list">
+              {simulatorDevices.map((device) => (
+                <label key={device.id}>
+                  <input
+                    checked={selectedSimulatorIds.includes(device.id)}
+                    disabled={runningSimulatorCleanup}
+                    onChange={() => toggleSimulator(device.id)}
+                    type="checkbox"
+                  />
+                  <span>
+                    <b>{device.name}</b>
+                    <small>{device.runtime} · {device.id}</small>
+                  </span>
+                </label>
+              ))}
+            </div>
             <div>
               <button disabled={runningSimulatorCleanup} onClick={() => setShowSimulatorConfirmation(false)}>
                 Cancel
               </button>
-              <button className="danger" disabled={runningSimulatorCleanup} onClick={() => void removeUnavailableSimulators()}>
-                {runningSimulatorCleanup ? "Removing…" : "Remove unavailable"}
+              <button
+                className="danger"
+                disabled={runningSimulatorCleanup || !selectedSimulatorIds.length}
+                onClick={() => void removeUnavailableSimulators()}
+              >
+                {runningSimulatorCleanup
+                  ? "Removing…"
+                  : "Remove " + selectedSimulatorIds.length + " device" + (selectedSimulatorIds.length === 1 ? "" : "s")}
               </button>
             </div>
           </section>
