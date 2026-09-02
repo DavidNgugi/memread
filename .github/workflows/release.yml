@@ -32,7 +32,8 @@ jobs:
       - name: Verify frontend build
         run: npm run build
       - name: Build MemRead installer
-        run: npm run tauri build
+        # GitHub-hosted runners do not have the local Apple Development certificate.
+        run: npm run tauri build -- --config '{"bundle":{"macOS":{"signingIdentity":"-"}}}'
       - name: Publish the macOS DMG
         uses: softprops/action-gh-release@v2
         with:
