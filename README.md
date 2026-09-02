@@ -50,6 +50,8 @@ The app guides you through Full Disk Access on first run. Grant it to the instal
 
 Download the latest DMG from [GitHub Releases](https://github.com/DavidNgugi/memread/releases), open it, and copy MemRead.app to Applications.
 
+Official releases are signed with Developer ID and notarized by Apple. If macOS flags an older release, download the latest release instead; pre-notarization releases should not be bypassed.
+
 For a local development build:
 
 ~~~sh
@@ -77,11 +79,34 @@ cargo test --locked
 
 ## Releases
 
-Pushing a tag beginning with v triggers the GitHub Actions release workflow. It verifies formatting, linting, Rust tests, and the frontend build before creating and attaching a macOS DMG to the GitHub release.
+Pushing a tag beginning with `v` triggers the GitHub Actions release workflow. It verifies formatting, linting, Rust tests, and the frontend build, then signs, notarizes, staples, and verifies the macOS DMG before publishing it. The workflow fails rather than publishing an ad-hoc-signed installer when its Apple credentials are unavailable.
+
+### One-time Apple setup
+
+MemRead is distributed outside the Mac App Store and therefore needs a Developer ID Application certificate and Apple notarization.
+
+1. Join or confirm the [Apple Developer Program](https://developer.apple.com/programs/) for team `YKY7LZN774`.
+2. In [Certificates, Identifiers & Profiles](https://developer.apple.com/account/resources/certificates/list), create a **Developer ID Application** certificate, export it from Keychain Access as a password-protected `.p12`, and Base64-encode it with `base64 -i certificate.p12 | tr -d '\n'`.
+3. In [App Store Connect Users and Access](https://appstoreconnect.apple.com/access/users), create an API key with Developer access and download its `.p8` file. Apple only permits that download once. Base64-encode it with `base64 -i AuthKey_KEYID.p8 | tr -d '\n'`.
+4. Add these GitHub Actions repository secrets. Never commit a certificate, password, or `.p8` key:
+
+| Secret | Value |
+| --- | --- |
+| `APPLE_CERTIFICATE` | Base64-encoded Developer ID Application `.p12` |
+| `APPLE_CERTIFICATE_PASSWORD` | Password used when exporting the `.p12` |
+| `KEYCHAIN_PASSWORD` | A new, random password used only by the temporary CI keychain |
+| `APPLE_TEAM_ID` | `YKY7LZN774` |
+| `APPLE_API_KEY_ID` | App Store Connect API key ID |
+| `APPLE_API_ISSUER` | App Store Connect API issuer ID |
+| `APPLE_API_KEY_BASE64` | Base64-encoded downloaded `.p8` API key |
+
+The [Tauri macOS signing guide](https://v2.tauri.app/distribute/sign/macos/) and [Apple notarization guide](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution) explain the underlying process.
+
+After the secrets are present, make a new patch release. Do not re-use an existing tag or ask people to bypass Gatekeeper for older artifacts.
 
 ~~~sh
-git tag v0.1.3
-git push origin v0.1.3
+git tag v0.1.4
+git push origin v0.1.4
 ~~~
 
 ## Architecture
