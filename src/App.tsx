@@ -75,6 +75,14 @@ interface SizedEntry {
   partial: boolean;
 }
 
+interface DirectoryCache {
+  activity: string[];
+  entries: StorageEntry[];
+  isComplete: boolean;
+  progress: ScanProgress;
+  summary: DiskSummary | null;
+}
+
 interface StorageExplorer {
   accessError: string;
   calculating: boolean;
@@ -95,7 +103,7 @@ interface StorageExplorer {
   goBack: () => void;
   moveSelectedToTrash: () => Promise<void>;
   openFolder: (entry: StorageEntry) => void;
-  scan: (path?: string) => Promise<void>;
+  scan: (path?: string, force?: boolean) => Promise<void>;
   scanBreadcrumb: (index: number) => void;
   scanHome: () => void;
   selectEntry: (entry: TrashTarget | null) => void;
@@ -269,6 +277,8 @@ function Icon({ name, ...props }: IconProps) {
 
 function useStorageExplorer(autoScan: boolean): StorageExplorer {
   const scanIdRef = useRef(0);
+  const scanPaths = useRef(new Map<number, string>());
+  const directoryCache = useRef(new Map<string, DirectoryCache>());
   const [isReady, setIsReady] = useState(
     () => localStorage.getItem("memread-setup-v2") === "yes",
   );
@@ -293,6 +303,22 @@ function useStorageExplorer(autoScan: boolean): StorageExplorer {
   const [notice, setNotice] = useState("");
   const hasAutoScanned = useRef(false);
 
+  function cacheKey(path: string): string {
+    return path || "__home__";
+  }
+
+  function beginMeasurement(path: string, scanId: number): void {
+    void invoke<void>("measure_storage", {
+      path: path || undefined,
+      scanId,
+    }).catch((error: unknown) => {
+      if (scanId === scanIdRef.current) {
+        setCalculating(false);
+        setNotice(errorMessage(error));
+      }
+    });
+  }
+
   useEffect(() => {
     let stopProgress: (() => void) | undefined;
     let stopSizes: (() => void) | undefined;
@@ -303,16 +329,35 @@ function useStorageExplorer(autoScan: boolean): StorageExplorer {
       }
 
       setScanProgress(payload);
+      const key = scanPaths.current.get(payload.scanId);
+      if (key) {
+        const cached = directoryCache.current.get(key);
+        if (cached) {
+          cached.progress = payload;
+        }
+      }
 
       if (payload.completedItem) {
         const completedItem = payload.completedItem;
         setScanActivity((items) =>
           [completedItem, ...items.filter((item) => item !== completedItem)].slice(0, 5),
         );
+        if (key) {
+          const cached = directoryCache.current.get(key);
+          if (cached) {
+            cached.activity = [completedItem, ...cached.activity.filter((item) => item !== completedItem)].slice(0, 5);
+          }
+        }
       }
 
       if (payload.total > 0 && payload.completed === payload.total) {
         setCalculating(false);
+        if (key) {
+          const cached = directoryCache.current.get(key);
+          if (cached) {
+            cached.isComplete = true;
+          }
+        }
         void notifyIfAllowed(
           "MemRead scan complete",
           "Measured " + payload.total + " items. Your storage map is ready.",
@@ -328,13 +373,21 @@ function useStorageExplorer(autoScan: boolean): StorageExplorer {
       }
 
       startTransition(() => {
-        setEntries((items) =>
-          items.map((item) =>
+        setEntries((items) => {
+          const nextEntries = items.map((item) =>
             item.path === payload.path
               ? { ...item, partial: payload.partial, size: payload.size }
               : item,
-          ),
-        );
+          );
+          const key = scanPaths.current.get(payload.scanId);
+          if (key) {
+            const cached = directoryCache.current.get(key);
+            if (cached) {
+              cached.entries = nextEntries;
+            }
+          }
+          return nextEntries;
+        });
       });
     }).then((unlisten) => {
       stopSizes = unlisten;
@@ -355,8 +408,25 @@ function useStorageExplorer(autoScan: boolean): StorageExplorer {
     void scan();
   }, [autoScan, isReady]);
 
-  async function scan(path = root): Promise<void> {
+  async function scan(path = root, force = false): Promise<void> {
     const scanId = ++scanIdRef.current;
+    const key = cacheKey(path);
+    const cached = directoryCache.current.get(key);
+
+    if (cached && !force) {
+      scanPaths.current.set(scanId, key);
+      setEntries(cached.entries);
+      setSummary(cached.summary);
+      setRoot(path);
+      setScanActivity(cached.activity);
+      setScanProgress({ ...cached.progress, scanId });
+      setIsScanning(false);
+      setCalculating(!cached.isComplete);
+      if (!cached.isComplete) {
+        beginMeasurement(path, scanId);
+      }
+      return;
+    }
 
     setIsScanning(true);
     setCalculating(true);
@@ -381,22 +451,28 @@ function useStorageExplorer(autoScan: boolean): StorageExplorer {
         return;
       }
 
+      const progress = {
+        completed: 0,
+        current: path || "Preparing your home folder",
+        scanId,
+        total: nextEntries.length,
+      };
+      directoryCache.current.set(key, {
+        activity: [],
+        entries: nextEntries,
+        isComplete: false,
+        progress,
+        summary: disk,
+      });
+      scanPaths.current.set(scanId, key);
       setEntries(nextEntries);
       setSummary(disk);
       setRoot(path);
       setIsScanning(false);
+      setScanProgress(progress);
 
       await nextFrame();
-
-      void invoke<void>("measure_storage", {
-        path: path || undefined,
-        scanId,
-      }).catch((error: unknown) => {
-        if (scanId === scanIdRef.current) {
-          setCalculating(false);
-          setNotice(errorMessage(error));
-        }
-      });
+      beginMeasurement(path, scanId);
     } catch (error) {
       if (scanId === scanIdRef.current) {
         setCalculating(false);
@@ -447,7 +523,14 @@ function useStorageExplorer(autoScan: boolean): StorageExplorer {
 
     try {
       await invoke<void>("move_to_trash", { path: selectedEntry.path });
-      setEntries((items) => items.filter((item) => item.path !== selectedEntry.path));
+      setEntries((items) => {
+        const nextEntries = items.filter((item) => item.path !== selectedEntry.path);
+        const cached = directoryCache.current.get(cacheKey(root));
+        if (cached) {
+          cached.entries = nextEntries;
+        }
+        return nextEntries;
+      });
       setNotice(selectedEntry.name + " is now in Trash.");
       setSelectedEntry(null);
     } catch (error) {
@@ -1646,7 +1729,7 @@ function Dashboard({ explorer }: { explorer: StorageExplorer }) {
         <DashboardHeader
           calculating={explorer.calculating}
           isScanning={explorer.isScanning}
-          onScan={explorer.scan}
+          onScan={() => explorer.scan(undefined, true)}
           summary={explorer.summary}
         />
         {explorer.calculating && (
