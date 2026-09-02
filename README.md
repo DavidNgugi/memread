@@ -1,7 +1,7 @@
 # MemRead
 
 <p align="center">
-  <a href="https://github.com/DavidNgugi/memread/releases"><img src="https://img.shields.io/github/v/tag/DavidNgugi/memread?label=version&sort=semver" alt="Version" /></a>
+  <a href="https://github.com/DavidNgugi/memread/releases"><img src="https://img.shields.io/github/v/tag/DavidNgugi/memread?label=version&sort=semver&cacheSeconds=60" alt="Latest version" /></a>
   <a href="https://github.com/DavidNgugi/memread/actions/workflows/release.yml"><img src="https://github.com/DavidNgugi/memread/actions/workflows/release.yml/badge.svg" alt="Release build" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2f6f5f" alt="MIT License" /></a>
   <img src="https://img.shields.io/badge/platform-macOS%20Apple%20silicon-172d2a" alt="macOS on Apple silicon" />
