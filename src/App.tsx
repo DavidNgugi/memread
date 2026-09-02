@@ -127,6 +127,7 @@ interface IconProps extends SVGProps<SVGSVGElement> {
     | "drive"
     | "folder"
     | "menu"
+    | "more"
     | "overview"
     | "refresh"
     | "search"
@@ -245,6 +246,7 @@ function Icon({ name, ...props }: IconProps) {
         <path d="M3 6.8A1.8 1.8 0 0 1 4.8 5H10l2 2h7.2A1.8 1.8 0 0 1 21 8.8v8.4a1.8 1.8 0 0 1-1.8 1.8H4.8A1.8 1.8 0 0 1 3 17.2Z" />
       )}
       {name === "menu" && <path d="M5 7h14M5 12h14M5 17h14" />}
+      {name === "more" && <path d="M6 12h.01M12 12h.01M18 12h.01" />}
       {name === "overview" && (
         <>
           <circle cx="12" cy="12" r="8.5" />
@@ -1075,6 +1077,88 @@ function StorageCapacityBar({ summary }: { summary: DiskSummary | null }) {
   );
 }
 
+interface DiskMapProps {
+  entries: StorageEntry[];
+  onOpenFolder: (entry: StorageEntry) => void;
+  summary: DiskSummary | null;
+}
+
+const DISK_MAP_COLORS = ["#4fd3a3", "#82d7d0", "#7aaaf5", "#a984f4", "#df6cbb", "#ef8b65", "#e7bf6a", "#a9cf75"];
+
+function arcPath(startAngle: number, endAngle: number, innerRadius: number, outerRadius: number): string {
+  const polar = (angle: number, radius: number) => {
+    const radians = ((angle - 90) * Math.PI) / 180;
+    return { x: 150 + radius * Math.cos(radians), y: 150 + radius * Math.sin(radians) };
+  };
+  const startOuter = polar(startAngle, outerRadius);
+  const endOuter = polar(endAngle, outerRadius);
+  const endInner = polar(endAngle, innerRadius);
+  const startInner = polar(startAngle, innerRadius);
+  const largeArc = endAngle - startAngle > 180 ? 1 : 0;
+
+  return `M ${startOuter.x} ${startOuter.y} A ${outerRadius} ${outerRadius} 0 ${largeArc} 1 ${endOuter.x} ${endOuter.y} L ${endInner.x} ${endInner.y} A ${innerRadius} ${innerRadius} 0 ${largeArc} 0 ${startInner.x} ${startInner.y} Z`;
+}
+
+function DiskMap({ entries, onOpenFolder, summary }: DiskMapProps) {
+  const measured = [...entries]
+    .filter((entry) => entry.size !== null && entry.size > 0)
+    .sort((left, right) => (right.size ?? 0) - (left.size ?? 0));
+  const visible = measured.slice(0, 8);
+  const total = visible.reduce((sum, entry) => sum + (entry.size ?? 0), 0);
+  let angle = 0;
+
+  return (
+    <section className="disk-map" aria-labelledby="disk-map-title">
+      <div className="disk-map-copy">
+        <p className="kicker">SPACE MAP</p>
+        <h2 id="disk-map-title">Your disk, in proportion.</h2>
+        <p>Click a segment to open that folder. The outer ring shows the largest items here.</p>
+      </div>
+      {visible.length ? (
+        <div className="disk-map-content">
+          <svg aria-label="Interactive storage map" className="disk-map-chart" viewBox="0 0 300 300">
+            {visible.map((entry, index) => {
+              const portion = (entry.size ?? 0) / total;
+              const endAngle = angle + portion * 360;
+              const path = arcPath(angle + 1.5, endAngle - 1.5, 66, 132);
+              angle = endAngle;
+              return (
+                <path
+                  className={entry.kind === "Folder" ? "disk-map-segment clickable" : "disk-map-segment"}
+                  d={path}
+                  fill={DISK_MAP_COLORS[index]}
+                  key={entry.path}
+                  onClick={() => entry.kind === "Folder" && onOpenFolder(entry)}
+                  role={entry.kind === "Folder" ? "button" : undefined}
+                  tabIndex={entry.kind === "Folder" ? 0 : undefined}
+                >
+                  <title>{entry.name + ": " + formatBytes(entry.size ?? 0)}</title>
+                </path>
+              );
+            })}
+            <circle className="disk-map-center" cx="150" cy="150" r="59" />
+            <text className="disk-map-total" textAnchor="middle" x="150" y="145">
+              {summary ? formatBytes(summary.total) : "Disk"}
+            </text>
+            <text className="disk-map-subtitle" textAnchor="middle" x="150" y="164">total</text>
+          </svg>
+          <div className="disk-map-legend">
+            {visible.map((entry, index) => (
+              <button disabled={entry.kind !== "Folder"} key={entry.path} onClick={() => onOpenFolder(entry)}>
+                <i style={{ background: DISK_MAP_COLORS[index] }} />
+                <span>{entry.name}</span>
+                <b>{formatBytes(entry.size ?? 0)}</b>
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <p className="disk-map-empty">The map fills in as folder sizes are calculated.</p>
+      )}
+    </section>
+  );
+}
+
 interface ScanProgressPanelProps {
   activity: string[];
   progress: ScanProgress;
@@ -1242,6 +1326,12 @@ interface BrowserRowProps {
 function BrowserRow({ entry, onOpenFolder, onSelectForTrash }: BrowserRowProps) {
   const canOpen = entry.kind === "Folder";
   const canTrash = entry.deletable && entry.size !== null;
+  const [showActions, setShowActions] = useState(false);
+
+  function finderAction(action: "open" | "quick-look" | "reveal"): void {
+    setShowActions(false);
+    void invoke<void>("finder_action", { action, path: entry.path });
+  }
 
   return (
     <article className="row">
@@ -1271,19 +1361,29 @@ function BrowserRow({ entry, onOpenFolder, onSelectForTrash }: BrowserRowProps) 
           formatBytes(entry.size)
         )}
       </strong>
-      {canTrash ? (
+      <div className="row-actions">
         <button
-          aria-label={"Move " + entry.name + " to Trash"}
-          className="delete"
-          onClick={() => onSelectForTrash(entry)}
+          aria-expanded={showActions}
+          aria-label={"Actions for " + entry.name}
+          className="more-actions"
+          onClick={() => setShowActions((shown) => !shown)}
         >
-          <Icon name="trash" />
+          <Icon name="more" />
         </button>
-      ) : (
-        <span className="protected">
-          <Icon name="shield" /> {entry.deletable ? "Calculating" : "Protected"}
-        </span>
-      )}
+        {showActions && (
+          <div className="action-menu">
+            <button onClick={() => finderAction("reveal")}>Show in Finder</button>
+            <button onClick={() => finderAction("quick-look")}>Quick Look</button>
+            <button onClick={() => finderAction("open")}>Open</button>
+            {canTrash && <button className="trash-action" onClick={() => { setShowActions(false); onSelectForTrash(entry); }}>Move to Trash</button>}
+          </div>
+        )}
+        {!canTrash && (
+          <span className="protected">
+            <Icon name="shield" /> {entry.deletable ? "Calculating" : "Protected"}
+          </span>
+        )}
+      </div>
     </article>
   );
 }
@@ -1645,6 +1745,7 @@ function Overview({
         </p>
       </div>
       <StorageCapacityBar summary={explorer.summary} />
+      <DiskMap entries={explorer.entries} onOpenFolder={explorer.openFolder} summary={explorer.summary} />
       <section className="overview-largest" aria-labelledby="largest-title">
         <div className="overview-section-head">
           <div>
@@ -1705,6 +1806,7 @@ function Overview({
 function Dashboard({ explorer }: { explorer: StorageExplorer }) {
   const [view, setView] = useState<DashboardView>("overview");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [showExplorerMap, setShowExplorerMap] = useState(false);
   const update = useUpdateCheck();
   const notifications = useNotificationPermission();
 
@@ -1748,6 +1850,18 @@ function Dashboard({ explorer }: { explorer: StorageExplorer }) {
         {view === "explorer" && (
           <>
             <StorageCapacityBar summary={explorer.summary} />
+            <div className="explorer-map-toggle">
+              <div>
+                <p className="kicker">SPACE MAP</p>
+                <span>Visualize this folder’s measured space.</span>
+              </div>
+              <button onClick={() => setShowExplorerMap((shown) => !shown)}>
+                {showExplorerMap ? "Hide map" : "Show map"}
+              </button>
+            </div>
+            {showExplorerMap && (
+              <DiskMap entries={explorer.entries} onOpenFolder={openFolder} summary={explorer.summary} />
+            )}
             <ExplorerTable
               entries={explorer.entries}
               onBack={explorer.goBack}

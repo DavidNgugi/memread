@@ -1,3 +1,4 @@
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -6,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -203,6 +204,7 @@ fn home_dir() -> Result<PathBuf, String> {
 
 // Sequoia/Tahoe protects these containers independently of Full Disk Access.
 // Traversing them causes a system prompt per app, so automatic scans omit them.
+#[cfg(test)]
 fn is_other_app_container(path: &Path, home: &Path) -> bool {
     let library = home.join("Library");
     ["Containers", "Group Containers"]
@@ -246,6 +248,10 @@ fn bytes_in(path: &Path, home: &Path, cancelled: &AtomicBool) -> Option<SizeMeas
         size: 0,
         partial: false,
     };
+    let protected_containers = [
+        home.join("Library/Containers"),
+        home.join("Library/Group Containers"),
+    ];
     let mut stack = vec![path.to_path_buf()];
     while let Some(directory) = stack.pop() {
         if cancelled.load(Ordering::Relaxed) {
@@ -274,12 +280,26 @@ fn bytes_in(path: &Path, home: &Path, cancelled: &AtomicBool) -> Option<SizeMeas
                     continue;
                 }
             };
+            let child_type = match child.file_type() {
+                Ok(file_type) => file_type,
+                Err(error) => {
+                    eprintln!(
+                        "MemRead could not inspect an item in {}: {error}",
+                        directory.display()
+                    );
+                    measurement.partial = true;
+                    continue;
+                }
+            };
+            if child_type.is_symlink() {
+                continue;
+            }
             let child_path = child.path();
-            if is_other_app_container(&child_path, home) {
+            if protected_containers.contains(&child_path) {
                 measurement.partial = true;
                 continue;
             }
-            let child_metadata = match fs::symlink_metadata(&child_path) {
+            let child_metadata = match child.metadata() {
                 Ok(metadata) => metadata,
                 Err(error) => {
                     eprintln!(
@@ -290,9 +310,6 @@ fn bytes_in(path: &Path, home: &Path, cancelled: &AtomicBool) -> Option<SizeMeas
                     continue;
                 }
             };
-            if child_metadata.file_type().is_symlink() {
-                continue;
-            }
             if child_metadata.is_dir() {
                 stack.push(child_path);
             } else if child_metadata.is_file() {
@@ -531,17 +548,27 @@ fn scan_storage_sync(path: Option<String>) -> Result<Vec<StorageEntry>, String> 
                 continue;
             }
         };
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) => {
+                eprintln!(
+                    "MemRead could not inspect an item in {}: {error}",
+                    root.display()
+                );
+                continue;
+            }
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
         let path = entry.path();
-        let metadata = match fs::symlink_metadata(&path) {
+        let metadata = match entry.metadata() {
             Ok(metadata) => metadata,
             Err(error) => {
                 eprintln!("MemRead could not inspect {}: {error}", path.display());
                 continue;
             }
         };
-        if metadata.file_type().is_symlink() {
-            continue;
-        }
         let modified = metadata
             .modified()
             .ok()
@@ -609,9 +636,10 @@ fn measure_storage_sync(
         }
     }
     let total = entries.len();
-    for (index, entry) in entries.into_iter().enumerate() {
+    let completed = Arc::new(AtomicUsize::new(0));
+    entries.into_par_iter().for_each(|entry| {
         if cancelled.load(Ordering::Relaxed) {
-            return Ok(());
+            return;
         }
         let path = entry.path();
         let item_name = path
@@ -624,16 +652,16 @@ fn measure_storage_sync(
             ScanProgress {
                 scan_id,
                 current: item_name.clone(),
-                completed: index,
+                completed: completed.load(Ordering::Relaxed),
                 total,
                 completed_item: None,
             },
         );
         let Ok(metadata) = fs::symlink_metadata(&path) else {
-            continue;
+            return;
         };
         if metadata.file_type().is_symlink() {
-            continue;
+            return;
         }
         let measurement = if metadata.is_file() {
             Some(SizeMeasurement {
@@ -644,7 +672,7 @@ fn measure_storage_sync(
             bytes_in(&path, &home, &cancelled)
         };
         let Some(measurement) = measurement else {
-            return Ok(());
+            return;
         };
         let sized_entry = SizedEntry {
             scan_id,
@@ -652,21 +680,28 @@ fn measure_storage_sync(
             size: measurement.size,
             partial: measurement.partial,
         };
-        if is_home_scan {
-            quick_glance.update_size(&sized_entry.path, sized_entry.size, sized_entry.partial)?;
+        if is_home_scan
+            && quick_glance
+                .update_size(&sized_entry.path, sized_entry.size, sized_entry.partial)
+                .is_ok()
+        {
             emit_quick_glance(&app, &quick_glance);
         }
         emit_sized_entry(&app, sized_entry);
+        let now_completed = completed.fetch_add(1, Ordering::Relaxed) + 1;
         emit_progress(
             &app,
             ScanProgress {
                 scan_id,
                 current: item_name.clone(),
-                completed: index + 1,
+                completed: now_completed,
                 total,
                 completed_item: Some(item_name),
             },
         );
+    });
+    if cancelled.load(Ordering::Relaxed) {
+        return Ok(());
     }
     emit_progress(
         &app,
@@ -909,6 +944,28 @@ fn open_creator_website() -> Result<(), String> {
 }
 
 #[tauri::command]
+fn finder_action(path: String, action: String) -> Result<(), String> {
+    let item = PathBuf::from(path)
+        .canonicalize()
+        .map_err(|_| "The selected item no longer exists.".to_string())?;
+    let mut command = Command::new(match action.as_str() {
+        "quick-look" => "qlmanage",
+        "open" | "reveal" => "open",
+        _ => return Err("That Finder action is not supported.".into()),
+    });
+    match action.as_str() {
+        "quick-look" => command.args(["-p", item.to_string_lossy().as_ref()]),
+        "reveal" => command.args(["-R", item.to_string_lossy().as_ref()]),
+        "open" => command.arg(item),
+        _ => unreachable!(),
+    };
+    command
+        .spawn()
+        .map_err(|error| format!("Could not complete that Finder action: {error}"))?;
+    Ok(())
+}
+
+#[tauri::command]
 fn open_latest_release() -> Result<(), String> {
     Command::new("open")
         .arg("https://github.com/DavidNgugi/memread/releases/latest")
@@ -953,6 +1010,7 @@ pub fn run() {
             open_full_disk_access,
             open_main_window,
             open_creator_website,
+            finder_action,
             open_latest_release,
             quit_app,
             verify_storage_access
