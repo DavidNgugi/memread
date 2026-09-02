@@ -9,7 +9,7 @@
 
 **A fast, local-first macOS storage explorer.**
 
-**Latest version:** [`v0.1.2`](https://github.com/DavidNgugi/memread/releases/tag/v0.1.2)
+**Latest version:** [`v0.1.3`](https://github.com/DavidNgugi/memread/releases/tag/v0.1.3)
 
 **Requirements:** macOS on Apple silicon, Full Disk Access
 **License:** [MIT](LICENSE)
@@ -80,8 +80,8 @@ cargo test --locked
 Pushing a tag beginning with v triggers the GitHub Actions release workflow. It verifies formatting, linting, Rust tests, and the frontend build before creating and attaching a macOS DMG to the GitHub release.
 
 ~~~sh
-git tag v0.1.2
-git push origin v0.1.2
+git tag v0.1.3
+git push origin v0.1.3
 ~~~
 
 ## Architecture
