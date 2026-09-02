@@ -22,6 +22,28 @@ interface StorageEntry {
   protectionReason?: string;
 }
 
+interface TrashTarget {
+  name: string;
+  path: string;
+  size: number | null;
+}
+
+interface CleanupShortcut {
+  action: "simctl" | "trash";
+  available: boolean;
+  caution: string;
+  description: string;
+  id: string;
+  name: string;
+  path: string | null;
+  size: number | null;
+}
+
+interface SavedCleanupShortcut {
+  name: string;
+  path: string;
+}
+
 interface DiskSummary {
   total: number;
   available: number;
@@ -54,7 +76,7 @@ interface StorageExplorer {
   root: string;
   scanActivity: string[];
   scanProgress: ScanProgress;
-  selectedEntry: StorageEntry | null;
+  selectedEntry: TrashTarget | null;
   summary: DiskSummary | null;
   trail: string[];
   verifyingAccess: boolean;
@@ -65,7 +87,7 @@ interface StorageExplorer {
   scan: (path?: string) => Promise<void>;
   scanBreadcrumb: (index: number) => void;
   scanHome: () => void;
-  selectEntry: (entry: StorageEntry | null) => void;
+  selectEntry: (entry: TrashTarget | null) => void;
   setQuery: (value: string) => void;
   verifyAccess: () => Promise<void>;
 }
@@ -216,7 +238,7 @@ function useStorageExplorer(autoScan: boolean): StorageExplorer {
     total: 0,
   });
   const [scanActivity, setScanActivity] = useState<string[]>([]);
-  const [selectedEntry, setSelectedEntry] = useState<StorageEntry | null>(null);
+  const [selectedEntry, setSelectedEntry] = useState<TrashTarget | null>(null);
   const [moving, setMoving] = useState(false);
   const [notice, setNotice] = useState("");
   const hasAutoScanned = useRef(false);
@@ -423,6 +445,106 @@ function useStorageExplorer(autoScan: boolean): StorageExplorer {
     verifyingAccess,
     verifyAccess,
   };
+}
+
+function readSavedCleanupShortcuts(): SavedCleanupShortcut[] {
+  try {
+    const stored = JSON.parse(localStorage.getItem("memread-cleanup-shortcuts") ?? "[]") as unknown;
+    if (!Array.isArray(stored)) {
+      return [];
+    }
+
+    return stored.filter(
+      (shortcut): shortcut is SavedCleanupShortcut =>
+        typeof shortcut === "object" &&
+        shortcut !== null &&
+        "name" in shortcut &&
+        "path" in shortcut &&
+        typeof shortcut.name === "string" &&
+        typeof shortcut.path === "string",
+    );
+  } catch {
+    return [];
+  }
+}
+
+function useCleanupShortcuts() {
+  const [shortcuts, setShortcuts] = useState<CleanupShortcut[]>([]);
+  const [saved, setSaved] = useState<SavedCleanupShortcut[]>(readSavedCleanupShortcuts);
+  const [isLoading, setIsLoading] = useState(true);
+  const [checkingId, setCheckingId] = useState<string | null>(null);
+
+  useEffect(() => {
+    localStorage.setItem("memread-cleanup-shortcuts", JSON.stringify(saved));
+  }, [saved]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.all([
+      invoke<CleanupShortcut[]>("cleanup_shortcuts"),
+      Promise.all(
+        saved.map(async (shortcut) => {
+          try {
+            const inspected = await invoke<CleanupShortcut>("inspect_cleanup_path", {
+              path: shortcut.path,
+            });
+            return { ...inspected, id: "custom:" + shortcut.path, name: shortcut.name };
+          } catch {
+            return null;
+          }
+        }),
+      ),
+    ])
+      .then(([builtIn, custom]) => {
+        if (!cancelled) {
+          setShortcuts([...builtIn, ...custom.filter((item): item is CleanupShortcut => item !== null)]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function checkSpace(shortcut: CleanupShortcut): Promise<void> {
+    if (!shortcut.path) {
+      return;
+    }
+
+    setCheckingId(shortcut.id);
+    try {
+      const inspected = await invoke<CleanupShortcut>("inspect_cleanup_path", { path: shortcut.path });
+      setShortcuts((items) =>
+        items.map((item) => (item.id === shortcut.id ? { ...shortcut, ...inspected } : item)),
+      );
+    } finally {
+      setCheckingId(null);
+    }
+  }
+
+  async function addShortcut(name: string, path: string): Promise<void> {
+    const inspected = await invoke<CleanupShortcut>("inspect_cleanup_path", { path });
+    const savedShortcut = { name: name.trim() || inspected.name, path: inspected.path ?? path };
+    setSaved((items) => [...items.filter((item) => item.path !== savedShortcut.path), savedShortcut]);
+    setShortcuts((items) => [
+      ...items.filter((item) => item.path !== savedShortcut.path),
+      { ...inspected, id: "custom:" + savedShortcut.path, name: savedShortcut.name },
+    ]);
+  }
+
+  function removeShortcut(shortcut: CleanupShortcut): void {
+    if (!shortcut.id.startsWith("custom:") || !shortcut.path) {
+      return;
+    }
+    setSaved((items) => items.filter((item) => item.path !== shortcut.path));
+    setShortcuts((items) => items.filter((item) => item.id !== shortcut.id));
+  }
+
+  return { addShortcut, checkSpace, checkingId, isLoading, removeShortcut, shortcuts };
 }
 
 function AboutView() {
@@ -919,7 +1041,7 @@ function BrowserRow({ entry, onOpenFolder, onSelectForTrash }: BrowserRowProps) 
 }
 
 interface TrashDialogProps {
-  entry: StorageEntry;
+  entry: TrashTarget;
   moving: boolean;
   onCancel: () => void;
   onConfirm: () => Promise<void>;
@@ -959,6 +1081,150 @@ function TrashDialog({ entry, moving, onCancel, onConfirm }: TrashDialogProps) {
   );
 }
 
+interface CleanupShortcutsProps {
+  onSelectForTrash: (entry: TrashTarget) => void;
+}
+
+function CleanupShortcuts({ onSelectForTrash }: CleanupShortcutsProps) {
+  const { addShortcut, checkSpace, checkingId, isLoading, removeShortcut, shortcuts } =
+    useCleanupShortcuts();
+  const [customName, setCustomName] = useState("");
+  const [customPath, setCustomPath] = useState("");
+  const [message, setMessage] = useState("");
+  const [runningSimulatorCleanup, setRunningSimulatorCleanup] = useState(false);
+  const [showSimulatorConfirmation, setShowSimulatorConfirmation] = useState(false);
+
+  async function saveCustomShortcut(): Promise<void> {
+    setMessage("");
+    try {
+      await addShortcut(customName, customPath);
+      setCustomName("");
+      setCustomPath("");
+      setMessage("Custom cleanup shortcut saved.");
+    } catch (error) {
+      setMessage(errorMessage(error));
+    }
+  }
+
+  async function removeUnavailableSimulators(): Promise<void> {
+    setRunningSimulatorCleanup(true);
+    try {
+      setMessage(await invoke<string>("run_cleanup_shortcut", { id: "unavailable-simulators" }));
+      setShowSimulatorConfirmation(false);
+    } catch (error) {
+      setMessage(errorMessage(error));
+    } finally {
+      setRunningSimulatorCleanup(false);
+    }
+  }
+
+  return (
+    <section className="cleanup-shortcuts" aria-labelledby="cleanup-title">
+      <div className="cleanup-heading">
+        <div>
+          <p className="kicker">QUICK CLEANUPS</p>
+          <h2 id="cleanup-title">Developer space, without the guesswork.</h2>
+        </div>
+        <p>Folders go to Trash. Tool cleanup is always explained before it runs.</p>
+      </div>
+      <div className="cleanup-grid">
+        {isLoading && <p className="cleanup-loading">Loading cleanup shortcuts…</p>}
+        {shortcuts.map((shortcut) => (
+          <article className="cleanup-card" key={shortcut.id}>
+            <div className="cleanup-card-top">
+              <div>
+                <p className="cleanup-kind">{shortcut.action === "simctl" ? "SIMULATOR TOOL" : "FOLDER"}</p>
+                <h3>{shortcut.name}</h3>
+              </div>
+              {shortcut.size !== null && <b>{formatBytes(shortcut.size)}</b>}
+            </div>
+            <p>{shortcut.description}</p>
+            <small>{shortcut.caution}</small>
+            <div className="cleanup-card-actions">
+              {shortcut.action === "trash" && shortcut.path && (
+                <>
+                  <button
+                    disabled={checkingId === shortcut.id || !shortcut.available}
+                    onClick={() => void checkSpace(shortcut).catch((error) => setMessage(errorMessage(error)))}
+                  >
+                    {checkingId === shortcut.id ? "Checking…" : shortcut.size === null ? "Check space" : "Recheck"}
+                  </button>
+                  <button
+                    className="cleanup-trash"
+                    disabled={!shortcut.available}
+                    onClick={() =>
+                      onSelectForTrash({
+                        name: shortcut.name,
+                        path: shortcut.path ?? "",
+                        size: shortcut.size,
+                      })
+                    }
+                  >
+                    Move to Trash
+                  </button>
+                </>
+              )}
+              {shortcut.action === "simctl" && (
+                <button
+                  className="cleanup-tool"
+                  disabled={runningSimulatorCleanup}
+                  onClick={() => setShowSimulatorConfirmation(true)}
+                >
+                  Remove unavailable
+                </button>
+              )}
+              {shortcut.id.startsWith("custom:") && (
+                <button className="cleanup-remove" onClick={() => removeShortcut(shortcut)}>
+                  Remove shortcut
+                </button>
+              )}
+            </div>
+          </article>
+        ))}
+      </div>
+      <details className="custom-cleanup">
+        <summary>Add your own folder shortcut</summary>
+        <div>
+          <label>
+            Name
+            <input onChange={(event) => setCustomName(event.target.value)} placeholder="Project cache" value={customName} />
+          </label>
+          <label>
+            Folder path
+            <input onChange={(event) => setCustomPath(event.target.value)} placeholder="/Users/you/Library/Caches/example" value={customPath} />
+          </label>
+          <button disabled={!customPath.trim()} onClick={() => void saveCustomShortcut()}>
+            Save shortcut
+          </button>
+        </div>
+        <p>Only folders inside your home directory can be saved. Protected app data and credentials remain blocked.</p>
+      </details>
+      {message && <p className="cleanup-message" role="status">{message}</p>}
+      {showSimulatorConfirmation && (
+        <div className="veil">
+          <section aria-busy={runningSimulatorCleanup} aria-modal="true" className="modal" role="dialog">
+            <Icon className="modal-icon" name="drive" />
+            <p className="kicker">SIMULATOR CLEANUP</p>
+            <h2>Remove unavailable simulators?</h2>
+            <p>
+              MemRead will ask Apple’s Simulator tool to remove devices whose runtime is no longer installed.
+              Your active iPhone and iPad simulator runtimes are not touched.
+            </p>
+            <div>
+              <button disabled={runningSimulatorCleanup} onClick={() => setShowSimulatorConfirmation(false)}>
+                Cancel
+              </button>
+              <button className="danger" disabled={runningSimulatorCleanup} onClick={() => void removeUnavailableSimulators()}>
+                {runningSimulatorCleanup ? "Removing…" : "Remove unavailable"}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function Dashboard({ explorer }: { explorer: StorageExplorer }) {
   return (
     <main className="app">
@@ -972,6 +1238,7 @@ function Dashboard({ explorer }: { explorer: StorageExplorer }) {
         <ScanProgressPanel activity={explorer.scanActivity} progress={explorer.scanProgress} />
       )}
       <StorageCapacityBar summary={explorer.summary} />
+      <CleanupShortcuts onSelectForTrash={explorer.selectEntry} />
       {explorer.notice && (
         <button className="toast" onClick={explorer.dismissNotice}>
           {explorer.notice} ×

@@ -41,6 +41,28 @@ struct DiskSummary {
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
+struct CleanupShortcut {
+    id: String,
+    name: String,
+    description: String,
+    caution: String,
+    path: Option<String>,
+    size: Option<u64>,
+    available: bool,
+    action: String,
+}
+
+struct CleanupDefinition {
+    id: &'static str,
+    name: &'static str,
+    description: &'static str,
+    caution: &'static str,
+    path: Option<PathBuf>,
+    action: &'static str,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct ScanProgress {
     scan_id: u64,
     current: String,
@@ -322,6 +344,108 @@ fn protection_for(path: &Path, home: &Path) -> Option<String> {
     None
 }
 
+fn cleanup_definitions(home: &Path) -> Vec<CleanupDefinition> {
+    vec![
+        CleanupDefinition {
+            id: "xcode-derived-data",
+            name: "Xcode Derived Data",
+            description: "Build indexes, intermediates, and previews recreated by Xcode.",
+            caution: "Safe to rebuild. Your projects and source code stay untouched.",
+            path: Some(home.join("Library/Developer/Xcode/DerivedData")),
+            action: "trash",
+        },
+        CleanupDefinition {
+            id: "xcode-archives",
+            name: "Xcode Archives",
+            description: "Archived app builds created for distribution or export.",
+            caution: "Keep any archive you may need to re-export or submit again.",
+            path: Some(home.join("Library/Developer/Xcode/Archives")),
+            action: "trash",
+        },
+        CleanupDefinition {
+            id: "yarn-cache",
+            name: "Yarn Cache",
+            description: "Downloaded Yarn packages that can be fetched again.",
+            caution: "The next install may take longer while packages download again.",
+            path: Some(home.join("Library/Caches/Yarn")),
+            action: "trash",
+        },
+        CleanupDefinition {
+            id: "cocoapods-cache",
+            name: "CocoaPods Cache",
+            description: "Cached CocoaPods specs and downloaded pod archives.",
+            caution: "The next pod install may take longer while dependencies download again.",
+            path: Some(home.join("Library/Caches/CocoaPods")),
+            action: "trash",
+        },
+        CleanupDefinition {
+            id: "unavailable-simulators",
+            name: "Unavailable iOS Simulators",
+            description: "Simulator devices whose matching runtime is no longer installed.",
+            caution:
+                "This permanently removes unavailable simulator devices, not your active runtimes.",
+            path: None,
+            action: "simctl",
+        },
+    ]
+}
+
+fn cleanup_shortcut(definition: CleanupDefinition) -> CleanupShortcut {
+    let available = definition.path.as_ref().is_none_or(|path| path.exists());
+    CleanupShortcut {
+        id: definition.id.into(),
+        name: definition.name.into(),
+        description: definition.description.into(),
+        caution: definition.caution.into(),
+        path: definition
+            .path
+            .map(|path| path.to_string_lossy().into_owned()),
+        size: None,
+        available,
+        action: definition.action.into(),
+    }
+}
+
+fn inspect_cleanup_path_sync(path: PathBuf) -> Result<CleanupShortcut, String> {
+    let home = home_dir()?;
+    let canonical = path
+        .canonicalize()
+        .map_err(|_| "That folder is not available.".to_string())?;
+    if canonical == home || !canonical.starts_with(&home) {
+        return Err("Custom shortcuts must point to a folder inside your home directory.".into());
+    }
+    if canonical.starts_with(home.join("Library/Containers"))
+        || canonical.starts_with(home.join("Library/Group Containers"))
+    {
+        return Err(
+            "macOS protects other apps' containers. MemRead will not create cleanup shortcuts for them."
+                .into(),
+        );
+    }
+    if let Some(reason) = protection_for(&canonical, &home) {
+        return Err(reason);
+    }
+
+    let cancelled = AtomicBool::new(false);
+    let measurement = bytes_in(&canonical, &home, &cancelled)
+        .ok_or_else(|| "Measuring this folder was cancelled.".to_string())?;
+    let name = canonical
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("Custom folder");
+    Ok(CleanupShortcut {
+        id: canonical.to_string_lossy().into_owned(),
+        name: name.into(),
+        description: "Your saved cleanup target.".into(),
+        caution: "Confirm this folder only contains files you are comfortable moving to Trash."
+            .into(),
+        path: Some(canonical.to_string_lossy().into_owned()),
+        size: Some(measurement.size),
+        available: true,
+        action: "trash".into(),
+    })
+}
+
 fn scan_root(path: Option<String>) -> Result<(PathBuf, PathBuf), String> {
     let home = home_dir()?;
     let root = path
@@ -560,6 +684,48 @@ fn disk_summary(
 }
 
 #[tauri::command]
+fn cleanup_shortcuts() -> Result<Vec<CleanupShortcut>, String> {
+    let home = home_dir()?;
+    Ok(cleanup_definitions(&home)
+        .into_iter()
+        .map(cleanup_shortcut)
+        .collect())
+}
+
+#[tauri::command]
+async fn inspect_cleanup_path(path: String) -> Result<CleanupShortcut, String> {
+    tauri::async_runtime::spawn_blocking(move || inspect_cleanup_path_sync(PathBuf::from(path)))
+        .await
+        .map_err(|error| format!("The cleanup inspection worker stopped unexpectedly: {error}"))?
+}
+
+#[tauri::command]
+async fn run_cleanup_shortcut(id: String) -> Result<String, String> {
+    if id != "unavailable-simulators" {
+        return Err("That cleanup is moved to Trash from the dashboard.".into());
+    }
+
+    tauri::async_runtime::spawn_blocking(|| {
+        let output = Command::new("xcrun")
+            .args(["simctl", "delete", "unavailable"])
+            .output()
+            .map_err(|error| format!("Could not run Simulator cleanup: {error}"))?;
+        if output.status.success() {
+            Ok("Unavailable simulators have been removed.".into())
+        } else {
+            let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            Err(if detail.is_empty() {
+                "Simulator cleanup did not complete.".into()
+            } else {
+                format!("Simulator cleanup did not complete: {detail}")
+            })
+        }
+    })
+    .await
+    .map_err(|error| format!("The simulator cleanup worker stopped unexpectedly: {error}"))?
+}
+
+#[tauri::command]
 fn quick_glance_snapshot(
     quick_glance: tauri::State<'_, Arc<QuickGlanceStore>>,
 ) -> Result<QuickGlanceSnapshot, String> {
@@ -689,6 +855,9 @@ pub fn run() {
             scan_storage,
             measure_storage,
             disk_summary,
+            cleanup_shortcuts,
+            inspect_cleanup_path,
+            run_cleanup_shortcut,
             quick_glance_snapshot,
             move_to_trash,
             open_full_disk_access,

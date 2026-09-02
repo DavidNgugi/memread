@@ -23,6 +23,8 @@ MemRead shows where disk space is going without uploading file names, paths, or 
 - Mark incomplete measurements as Partial when macOS protects or denies access to content.
 - Search the current directory and navigate with breadcrumbs.
 - Move eligible items to macOS Trash after confirmation.
+- Use measured, confirmation-gated shortcuts for Xcode Derived Data, Archives, Yarn cache, CocoaPods cache, and unavailable simulator devices.
+- Save personal cleanup shortcuts for folders inside your home directory; protected app containers and credentials remain unavailable.
 - Protect app data, credentials, and developer-tool directories from accidental removal.
 - Open a menu-bar quick glance with available storage and the largest scanned items.
 - Cancel stale background scans automatically when you navigate to another folder.
