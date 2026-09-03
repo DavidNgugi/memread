@@ -26,6 +26,7 @@ jobs:
           node-version: 24
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Install JavaScript dependencies
         run: npm ci
       - name: Verify Rust formatting
@@ -56,9 +57,41 @@ jobs:
           printf '%s' "$APPLE_API_KEY_BASE64" | base64 --decode > "$key_path"
           chmod 600 "$key_path"
           echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
-      - name: Build MemRead installer
-        # Tauri imports the Developer ID certificate, notarizes, and staples the DMG.
-        run: npm run tauri build
+      - name: Build signed MemRead installer
+        # Keep notarization separate so a transient Apple network failure can be retried safely.
+        run: env -u APPLE_API_KEY -u APPLE_API_ISSUER -u APPLE_API_KEY_PATH npm run tauri build -- --bundles dmg
+      - name: Notarize and staple installer
+        run: |
+          set -euo pipefail
+          dmg=$(find src-tauri/target/release/bundle/dmg -name '*.dmg' -print -quit)
+          test -n "$dmg"
+
+          submission_json=""
+          for attempt in 1 2 3; do
+            if submission_json=$(xcrun notarytool submit "$dmg" \
+              --key "$APPLE_API_KEY_PATH" \
+              --key-id "$APPLE_API_KEY" \
+              --issuer "$APPLE_API_ISSUER" \
+              --output-format json); then
+              break
+            fi
+            test "$attempt" = 3 && exit 1
+            sleep $((attempt * 30))
+          done
+
+          submission_id=$(printf '%s' "$submission_json" | plutil -extract id raw -)
+          test -n "$submission_id"
+          for attempt in 1 2 3 4 5; do
+            if xcrun notarytool wait "$submission_id" \
+              --key "$APPLE_API_KEY_PATH" \
+              --key-id "$APPLE_API_KEY" \
+              --issuer "$APPLE_API_ISSUER"; then
+              break
+            fi
+            test "$attempt" = 5 && exit 1
+            sleep 30
+          done
+          xcrun stapler staple "$dmg"
       - name: Verify signed and notarized installer
         run: |
           dmg=$(find src-tauri/target/release/bundle/dmg -name '*.dmg' -print -quit)
